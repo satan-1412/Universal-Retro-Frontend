@@ -7,6 +7,7 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -31,6 +32,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -51,18 +53,22 @@ public class MainActivity extends Activity {
     private GamepadView gamepadView;
     private long backPressedTime = 0;
     private boolean isDarkMode = false;
+    private SharedPreferences prefs;
 
     // 自定义输入框外观
-    private int inputBgColor = Color.WHITE;
-    private int inputTextColor = Color.BLACK;
+    public int inputBgColor = Color.WHITE;
+    public int inputTextColor = Color.BLACK;
+    // 屏幕方向：0=横屏, 1=竖屏, 2=自动
+    public int screenOrientationMode = 0; 
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setupImmersive();
-        SharedPreferences prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE);
+        prefs = getSharedPreferences("AppPrefs", MODE_PRIVATE);
         inputBgColor = prefs.getInt("inputBgColor", Color.WHITE);
         inputTextColor = prefs.getInt("inputTextColor", Color.BLACK);
+        screenOrientationMode = prefs.getInt("screenOrientation", 0);
+        applyScreenOrientation();
 
         rootLayout = new FrameLayout(this);
         rootLayout.setBackgroundColor(Color.parseColor("#111111"));
@@ -72,12 +78,21 @@ public class MainActivity extends Activity {
         showStartupSelector();
     }
 
-    private void setupImmersive() {
-        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+    private void applyScreenOrientation() {
+        if (screenOrientationMode == 0) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        else if (screenOrientationMode == 1) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+        else setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+    }
+
+    public void setupImmersive() {
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+        );
     }
 
     // ================= 3模式启动器 =================
-    private void showStartupSelector() {
+    public void showStartupSelector() {
+        setupImmersive();
         rootLayout.removeAllViews();
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -90,7 +105,10 @@ public class MainActivity extends Activity {
         title.setPadding(0, 0, 0, 50);
         layout.addView(title);
 
-        layout.addView(createBigButton("🌐 在线 Web/H5/Flash 游戏", v -> showUrlInputDialog("https://m.4399.com")));
+        layout.addView(createBigButton("🌐 在线 Web/H5/Flash 游戏", v -> {
+            String lastUrl = prefs.getString("lastUrl", "");
+            showUrlInputDialog(lastUrl);
+        }));
         layout.addView(createBigButton("🎞️ 本地 Flash (.swf) 播放器", v -> loadLocalCore("swf")));
         layout.addView(createBigButton("☕ 本地 Java (.jar) 模拟器", v -> loadLocalCore("jar")));
 
@@ -103,7 +121,7 @@ public class MainActivity extends Activity {
         btn.setTextColor(Color.WHITE);
         btn.setTextSize(18f);
         btn.setBackgroundColor(Color.parseColor("#333333"));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(600, 120);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(800, 150);
         params.setMargins(0, 20, 0, 20);
         btn.setLayoutParams(params);
         btn.setOnClickListener(listener);
@@ -111,13 +129,10 @@ public class MainActivity extends Activity {
     }
 
     private void loadLocalCore(String type) {
-        // 预留的本地核心加载接口
-        Toast.makeText(this, "正在调用本地 " + type + " 核心... (需配置底层存储权限)", Toast.LENGTH_SHORT).show();
-        // 此处可调用 FilePicker 选择本地文件，然后扔给 WebView 或 J2ME 核心
-        startGameContainer("file:///android_asset/local_" + type + "_player.html");
+        Toast.makeText(this, "正在调用本地 " + type + " 核心... (需后续补全本地文件解析引擎)", Toast.LENGTH_SHORT).show();
     }
 
-    // ================= URL 弹窗与自定义输入框 =================
+    // ================= URL 弹窗与预设颜色工具 =================
     public void showUrlInputDialog(String defaultUrl) {
         Dialog dialog = new Dialog(this, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen);
         LinearLayout layout = new LinearLayout(this);
@@ -128,31 +143,60 @@ public class MainActivity extends Activity {
         final EditText urlInput = new EditText(this);
         urlInput.setText(defaultUrl);
         urlInput.setTextColor(inputTextColor);
-        urlInput.setHint("输入网址...");
+        urlInput.setHint("输入网址 (会自动记忆)...");
         urlInput.setHintTextColor(Color.GRAY);
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
         bg.setColor(inputBgColor);
         bg.setCornerRadius(15f);
         urlInput.setBackground(bg);
-        urlInput.setPadding(40, 30, 40, 30);
-        layout.addView(urlInput, new LinearLayout.LayoutParams(800, ViewGroup.LayoutParams.WRAP_CONTENT));
+        urlInput.setPadding(40, 40, 40, 40);
+        layout.addView(urlInput, new LinearLayout.LayoutParams(900, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button goBtn = new Button(this);
-        goBtn.setText("🚀 载入游戏");
+        goBtn.setText("🚀 载入网页引擎");
         goBtn.setBackgroundColor(Color.parseColor("#4CAF50"));
         goBtn.setTextColor(Color.WHITE);
         goBtn.setOnClickListener(v -> {
             String url = urlInput.getText().toString();
+            if (url.isEmpty()) return;
             if (!url.startsWith("http")) url = "https://" + url;
+            prefs.edit().putString("lastUrl", url).apply(); // 记忆网址
             dialog.dismiss();
             startGameContainer(url);
         });
         
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(800, 120);
-        bp.setMargins(0, 30, 0, 0);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(900, 130);
+        bp.setMargins(0, 40, 0, 0);
         layout.addView(goBtn, bp);
+        
+        Button cancelBtn = new Button(this);
+        cancelBtn.setText("🔙 返回");
+        cancelBtn.setBackgroundColor(Color.parseColor("#777777"));
+        cancelBtn.setTextColor(Color.WHITE);
+        cancelBtn.setOnClickListener(v -> dialog.dismiss());
+        layout.addView(cancelBtn, bp);
+
         dialog.setContentView(layout);
         dialog.show();
+    }
+
+    // 生成预设颜色调色板 (供颜色设置使用)
+    public HorizontalScrollView createColorPalette(EditText targetInput) {
+        HorizontalScrollView scroll = new HorizontalScrollView(this);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        String[] colors = {"#FFFFFF", "#000000", "#F44336", "#4CAF50", "#2196F3", "#FFEB3B", "#9C27B0", "#795548", "#9E9E9E"};
+        for (String c : colors) {
+            Button btn = new Button(this);
+            btn.setBackgroundColor(Color.parseColor(c));
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(80, 80);
+            p.setMargins(10, 10, 10, 10);
+            btn.setLayoutParams(p);
+            btn.setOnClickListener(v -> targetInput.setText(c));
+            layout.addView(btn);
+        }
+        scroll.addView(layout);
+        return scroll;
     }
 
     private void startGameContainer(String url) {
@@ -178,18 +222,17 @@ public class MainActivity extends Activity {
         webView.setBackgroundColor(Color.BLACK);
     }
 
-    // ================= 双击返回退出 =================
     @Override
     public void onBackPressed() {
         if (gamepadView != null && gamepadView.isEditMode) {
-            Toast.makeText(this, "请先保存按键配置再退出", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "请先点击屏幕上方的【保存并退出编辑】", Toast.LENGTH_SHORT).show();
             return;
         }
         long now = System.currentTimeMillis();
         if (now - backPressedTime < 2000) {
             super.onBackPressed();
         } else {
-            Toast.makeText(this, "再按一次退出游戏", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "再按一次退出 App", Toast.LENGTH_SHORT).show();
             backPressedTime = now;
         }
     }
@@ -236,7 +279,7 @@ public class MainActivity extends Activity {
             this.activity = context;
             this.targetEngine = webView;
             vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-            prefs = context.getSharedPreferences("IkemenGamepad_Pro_V6", MODE_PRIVATE);
+            prefs = context.getSharedPreferences("IkemenGamepad_Pro_V7", MODE_PRIVATE);
             
             paintText.setTextAlign(Paint.Align.CENTER);
             paintText.setTypeface(Typeface.DEFAULT_BOLD);
@@ -245,12 +288,12 @@ public class MainActivity extends Activity {
             dashPaint.setColor(Color.YELLOW);
             
             mousePaint.setColor(Color.RED);
-            mousePaint.setShadowLayer(5, 0, 0, Color.BLACK);
+            mousePaint.setShadowLayer(5, 0, 0, Color.WHITE);
 
             loadConfig();
         }
 
-        // ================= JS 注入引擎 =================
+        // ================= JS 注入引擎 (真实鼠标机制) =================
         private void injectKeyEvent(String keyString, boolean isDown) {
             if (keyString == null || keyString.isEmpty()) return;
             String action = isDown ? "keydown" : "keyup";
@@ -260,10 +303,13 @@ public class MainActivity extends Activity {
             }
         }
         
-        private void injectMouseClick(boolean isRight) {
-            String btn = isRight ? "2" : "0";
-            String js = "var el = document.elementFromPoint(" + mouseX + "," + mouseY + ");" +
-                        "if(el){ var ev = new MouseEvent('click', {clientX:" + mouseX + ", clientY:" + mouseY + ", button:" + btn + ", bubbles:true}); el.dispatchEvent(ev); }";
+        private void injectMouseClick(boolean isRight, boolean isDown) {
+            // H5 游戏需要真实的 down 和 up 状态才能识别按压
+            String action = isDown ? "mousedown" : "mouseup";
+            String btnCode = isRight ? "2" : "0";
+            String js = "var el = document.elementFromPoint(" + mouseX + "," + mouseY + ") || document.body;" +
+                        "var ev = new MouseEvent('" + action + "', {bubbles: true, cancelable: true, clientX: " + mouseX + ", clientY: " + mouseY + ", button: " + btnCode + "});" +
+                        "el.dispatchEvent(ev);";
             activity.runOnUiThread(() -> targetEngine.evaluateJavascript(js, null));
         }
 
@@ -278,13 +324,12 @@ public class MainActivity extends Activity {
             paintBtn.setAlpha(150);
             canvas.drawRoundRect(menuRect, 30, 30, paintBtn);
             paintText.setColor(Color.WHITE);
-            paintText.setTextSize(40);
-            canvas.drawText("⚙️", menuRect.centerX(), menuRect.centerY() + 15, paintText);
+            paintText.setTextSize(50);
+            canvas.drawText("⚙️", menuRect.centerX(), menuRect.centerY() + 18, paintText);
 
             // 绘制虚拟鼠标
             if (isMouseMode) {
                 canvas.drawCircle(mouseX, mouseY, 15, mousePaint);
-                // 绘制左侧控制摇杆
                 paintBtn.setColor(Color.parseColor("#333333"));
                 paintBtn.setAlpha(100);
                 canvas.drawCircle(joyBaseX, joyBaseY, joyRadius, paintBtn);
@@ -295,7 +340,7 @@ public class MainActivity extends Activity {
 
             // 绘制所有按键
             for (VirtualButton btn : buttons) {
-                int currentAlpha = isEditMode ? 150 : (btn.isPressed ? 220 : btn.alpha);
+                int currentAlpha = isEditMode ? 180 : (btn.isPressed ? 255 : btn.alpha);
                 
                 if (btn.skinBitmap != null && !btn.skinBitmap.isRecycled()) {
                     paintBtn.setAlpha(currentAlpha);
@@ -324,15 +369,18 @@ public class MainActivity extends Activity {
             }
             
             if (isEditMode) {
-                paintText.setTextSize(50);
+                paintText.setTextSize(40);
                 paintText.setColor(Color.GREEN);
-                canvas.drawText("【编辑模式】拖拽调整位置，轻触按键进行设置", getWidth()/2f, 100, paintText);
+                paintText.setShadowLayer(5, 0, 0, Color.BLACK);
+                canvas.drawText("【编辑模式】拖拽位置，轻触按键设置。点下方按钮保存。", getWidth()/2f, 80, paintText);
+                paintText.clearShadowLayer();
                 
-                // 屏幕上绘制大大的“保存退出”按钮
+                // 屏幕上绘制大大的“保存退出”按钮 (防呆设计)
                 paintBtn.setColor(Color.RED); paintBtn.setAlpha(200);
-                canvas.drawRoundRect(new RectF(getWidth()/2f - 150, 150, getWidth()/2f + 150, 250), 20, 20, paintBtn);
+                canvas.drawRoundRect(new RectF(getWidth()/2f - 200, 120, getWidth()/2f + 200, 220), 20, 20, paintBtn);
                 paintText.setColor(Color.WHITE);
-                canvas.drawText("💾 保存并退出", getWidth()/2f, 215, paintText);
+                paintText.setTextSize(45);
+                canvas.drawText("💾 保存并退出", getWidth()/2f, 185, paintText);
             }
         }
 
@@ -369,7 +417,7 @@ public class MainActivity extends Activity {
                 for (int i = 0; i < event.getPointerCount(); i++) {
                     if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && i == actionIndex) continue;
                     float px = event.getX(i), py = event.getY(i);
-                    if (px < getWidth() / 2f) {
+                    if (px < getWidth() / 2f) { // 限制鼠标摇杆只能在左半屏生效
                         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
                             if (Math.hypot(px - joyBaseX, py - joyBaseY) < joyRadius * 1.5f) joyPointerId = event.getPointerId(i);
                         }
@@ -380,9 +428,8 @@ public class MainActivity extends Activity {
                             if (dist > joyRadius) { joyKnobX = joyBaseX + (dx/dist)*joyRadius; joyKnobY = joyBaseY + (dy/dist)*joyRadius; }
                             else { joyKnobX = px; joyKnobY = py; }
                             
-                            // 极速更新鼠标位置
-                            mouseX += (dx / joyRadius) * 15f;
-                            mouseY += (dy / joyRadius) * 15f;
+                            mouseX += (dx / joyRadius) * 20f; // 鼠标灵敏度
+                            mouseY += (dy / joyRadius) * 20f;
                             mouseX = Math.max(0, Math.min(mouseX, getWidth()));
                             mouseY = Math.max(0, Math.min(mouseY, getHeight()));
                         }
@@ -405,14 +452,16 @@ public class MainActivity extends Activity {
                     btn.isPressed = true;
                     if (vibrator != null) vibrator.vibrate(20);
                     
-                    if (btn.id.equals("L-Click")) injectMouseClick(false);
-                    else if (btn.id.equals("R-Click")) injectMouseClick(true);
+                    if (btn.id.equals("L-Click")) injectMouseClick(false, true);
+                    else if (btn.id.equals("R-Click")) injectMouseClick(true, true);
                     else if (btn.isTurbo) btn.startTurbo(this);
                     else injectKeyEvent(btn.keyMapStr, true);
                     
                 } else if (btn.isPressed && !isTouchedNow) {
                     btn.isPressed = false;
-                    if (!btn.id.equals("L-Click") && !btn.id.equals("R-Click")) {
+                    if (btn.id.equals("L-Click")) injectMouseClick(false, false);
+                    else if (btn.id.equals("R-Click")) injectMouseClick(true, false);
+                    else {
                         if (btn.isTurbo) btn.stopTurbo();
                         else injectKeyEvent(btn.keyMapStr, false);
                     }
@@ -426,9 +475,10 @@ public class MainActivity extends Activity {
             float x = event.getX(actionIndex), y = event.getY(actionIndex);
             if (action == MotionEvent.ACTION_DOWN) {
                 // 点击保存按钮区域
-                if (x > getWidth()/2f - 150 && x < getWidth()/2f + 150 && y > 150 && y < 250) {
+                if (x > getWidth()/2f - 200 && x < getWidth()/2f + 200 && y > 120 && y < 220) {
                     isEditMode = false; saveConfig();
-                    Toast.makeText(getContext(), "布局已保存！", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(getContext(), "布局已保存并退出编辑！", Toast.LENGTH_SHORT).show();
+                    activity.setupImmersive();
                     invalidate(); return;
                 }
                 downX = x; downY = y;
@@ -447,64 +497,109 @@ public class MainActivity extends Activity {
             }
         }
 
-        // ================= 悬浮工具菜单与设置 =================
+        // ================= 悬浮工具菜单与设置 (加入平滑滚动与方向设置) =================
         private void showFloatingToolMenu() {
             Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
+            ScrollView scroll = new ScrollView(getContext());
             LinearLayout layout = new LinearLayout(getContext());
             layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setPadding(50, 50, 50, 50);
+            layout.setPadding(60, 60, 60, 60);
             
-            layout.addView(createMenuButton("🛠️ 编辑虚拟按键", v -> { isEditMode = true; dialog.dismiss(); invalidate(); }));
+            TextView title = new TextView(getContext());
+            title.setText("⚙️ 全局设置菜单");
+            title.setTextColor(Color.WHITE);
+            title.setTextSize(22f);
+            title.setPadding(0, 0, 0, 30);
+            layout.addView(title);
+            
+            layout.addView(createMenuButton("🛠️ 编辑虚拟按键布局", v -> { isEditMode = true; dialog.dismiss(); invalidate(); }));
             layout.addView(createMenuButton("➕ 新增自定义按键", v -> { 
-                buttons.add(new VirtualButton("New", getWidth()/2f, getHeight()/2f, 80, "Space"));
+                buttons.add(new VirtualButton("新键", getWidth()/2f, getHeight()/2f, 80, "Space"));
                 isEditMode = true; dialog.dismiss(); invalidate(); 
             }));
             layout.addView(createMenuButton(isMouseMode ? "🖱️ 关闭鼠标模式" : "🖱️ 开启鼠标指针模式", v -> { isMouseMode = !isMouseMode; saveConfig(); dialog.dismiss(); invalidate(); }));
-            layout.addView(createMenuButton("🌗 切换网页白天/黑夜模式", v -> { activity.toggleWebTheme(); dialog.dismiss(); }));
-            layout.addView(createMenuButton("🌐 重新输入网址", v -> { dialog.dismiss(); activity.showUrlInputDialog(targetEngine.getUrl()); }));
-            layout.addView(createMenuButton("⚙️ 输入框颜色自定义", v -> { dialog.dismiss(); showInputBoxSettings(); }));
-            layout.addView(createMenuButton("🏠 返回主菜单(3选1)", v -> { dialog.dismiss(); activity.showStartupSelector(); }));
+            
+            // 屏幕方向控制
+            String currentOri = activity.screenOrientationMode == 0 ? "横屏" : (activity.screenOrientationMode == 1 ? "竖屏" : "自动识别");
+            layout.addView(createMenuButton("📱 切换屏幕方向 (当前: " + currentOri + ")", v -> {
+                activity.screenOrientationMode = (activity.screenOrientationMode + 1) % 3;
+                activity.prefs.edit().putInt("screenOrientation", activity.screenOrientationMode).apply();
+                activity.applyScreenOrientation();
+                dialog.dismiss();
+                Toast.makeText(getContext(), "方向已切换，请重新打开菜单以刷新 UI", Toast.LENGTH_SHORT).show();
+            }));
 
-            dialog.setContentView(layout);
+            layout.addView(createMenuButton("🌗 切换网页白天/黑夜滤镜", v -> { activity.toggleWebTheme(); dialog.dismiss(); }));
+            layout.addView(createMenuButton("🌐 重新输入网址", v -> { dialog.dismiss(); activity.showUrlInputDialog(targetEngine.getUrl()); }));
+            layout.addView(createMenuButton("🎨 UI 颜色与背景自定义", v -> { dialog.dismiss(); showInputBoxSettings(); }));
+            layout.addView(createMenuButton("🏠 返回主菜单 (核心选择)", v -> { dialog.dismiss(); activity.showStartupSelector(); }));
+
+            scroll.addView(layout);
+            dialog.setContentView(scroll);
+            
+            // 限制弹窗高度，确保能在小屏上滑动
+            android.view.Window window = dialog.getWindow();
+            if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
             dialog.show();
         }
 
         private void showInputBoxSettings() {
             Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
+            ScrollView scroll = new ScrollView(getContext());
             LinearLayout layout = new LinearLayout(getContext());
             layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setPadding(50, 50, 50, 50);
+            layout.setPadding(60, 60, 60, 60);
             
-            TextView tv = new TextView(getContext());
-            tv.setText("输入框背景色和字体色(例如 #FFFFFF)");
-            tv.setTextColor(Color.WHITE);
-            layout.addView(tv);
+            TextView tv1 = new TextView(getContext());
+            tv1.setText("输入框背景色 (填色号或点下方选色)");
+            tv1.setTextColor(Color.WHITE);
+            layout.addView(tv1);
 
             EditText bgEt = new EditText(getContext());
             bgEt.setText(String.format("#%06X", (0xFFFFFF & activity.inputBgColor)));
-            bgEt.setTextColor(Color.WHITE);
-            layout.addView(bgEt);
+            bgEt.setTextColor(Color.BLACK); // 保证文字可读
+            bgEt.setBackgroundColor(Color.WHITE);
+            bgEt.setPadding(20, 20, 20, 20);
+            layout.addView(bgEt, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            layout.addView(activity.createColorPalette(bgEt));
+
+            TextView tv2 = new TextView(getContext());
+            tv2.setText("输入框字体色 (填色号或点下方选色)");
+            tv2.setTextColor(Color.WHITE);
+            tv2.setPadding(0, 40, 0, 0);
+            layout.addView(tv2);
 
             EditText txtEt = new EditText(getContext());
             txtEt.setText(String.format("#%06X", (0xFFFFFF & activity.inputTextColor)));
-            txtEt.setTextColor(Color.WHITE);
-            layout.addView(txtEt);
+            txtEt.setTextColor(Color.BLACK); // 保证文字可读
+            txtEt.setBackgroundColor(Color.WHITE);
+            txtEt.setPadding(20, 20, 20, 20);
+            layout.addView(txtEt, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            layout.addView(activity.createColorPalette(txtEt));
 
             Button saveBtn = new Button(getContext());
-            saveBtn.setText("保存颜色 (未来可支持载入本地字体)");
+            saveBtn.setText("💾 保存颜色并应用");
+            saveBtn.setBackgroundColor(Color.parseColor("#4CAF50"));
+            saveBtn.setTextColor(Color.WHITE);
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120);
+            bp.setMargins(0, 50, 0, 0);
+            saveBtn.setLayoutParams(bp);
+            
             saveBtn.setOnClickListener(v -> {
                 try {
                     activity.inputBgColor = Color.parseColor(bgEt.getText().toString());
                     activity.inputTextColor = Color.parseColor(txtEt.getText().toString());
-                    activity.getSharedPreferences("AppPrefs", MODE_PRIVATE).edit()
+                    activity.prefs.edit()
                         .putInt("inputBgColor", activity.inputBgColor)
                         .putInt("inputTextColor", activity.inputTextColor).apply();
-                    Toast.makeText(getContext(), "已保存，下次打开输入框生效", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(getContext(), "已保存全局生效", Toast.LENGTH_SHORT).show();
                     dialog.dismiss();
-                } catch (Exception e) { Toast.makeText(getContext(), "颜色代码错误", Toast.LENGTH_SHORT).show(); }
+                } catch (Exception e) { Toast.makeText(getContext(), "颜色代码有误，请重试", Toast.LENGTH_SHORT).show(); }
             });
             layout.addView(saveBtn);
-            dialog.setContentView(layout);
+            
+            scroll.addView(layout);
+            dialog.setContentView(scroll);
             dialog.show();
         }
 
@@ -512,50 +607,51 @@ public class MainActivity extends Activity {
             Button btn = new Button(getContext());
             btn.setText(text);
             btn.setTextColor(Color.WHITE);
-            btn.setBackgroundColor(Color.parseColor("#4CAF50"));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120);
+            btn.setBackgroundColor(Color.parseColor("#333333"));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 130);
             lp.setMargins(0, 10, 0, 10);
             btn.setLayoutParams(lp);
             btn.setOnClickListener(listener);
             return btn;
         }
 
-        // 按钮单体高级设置 (核心移植)
+        // ================= 按钮单体高级设置 (防呆防误触版) =================
         private void showButtonSettingsDialog(VirtualButton btn) {
             Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
             ScrollView scroll = new ScrollView(getContext());
             LinearLayout layout = new LinearLayout(getContext());
             layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setPadding(50, 50, 50, 50);
+            layout.setPadding(60, 40, 60, 60);
 
-            TextView title = new TextView(getContext()); title.setText("配置按键: " + btn.id); title.setTextColor(Color.WHITE); title.setTextSize(20); layout.addView(title);
+            TextView title = new TextView(getContext()); title.setText("配置按键: " + btn.id); title.setTextColor(Color.WHITE); title.setTextSize(22); layout.addView(title);
             
-            final EditText nameInput = new EditText(getContext()); nameInput.setText(btn.id); nameInput.setTextColor(Color.WHITE); nameInput.setHint("按键名称"); layout.addView(nameInput);
-            final EditText keyInput = new EditText(getContext()); keyInput.setText(btn.keyMapStr); keyInput.setTextColor(Color.WHITE); keyInput.setHint("映射键值 (如 A+B)"); layout.addView(keyInput);
+            final EditText nameInput = createBlackTextEdit(btn.id, "按键名称 (L-Click/R-Click为鼠标专有)"); layout.addView(nameInput);
+            final EditText keyInput = createBlackTextEdit(btn.keyMapStr, "映射键值 (如 A 或 A+B)"); layout.addView(keyInput);
             
-            // 外观定制
-            final EditText colorInput = new EditText(getContext()); colorInput.setText(String.format("#%06X", (0xFFFFFF & btn.color))); colorInput.setTextColor(Color.WHITE); colorInput.setHint("常态颜色代码"); layout.addView(colorInput);
-            final EditText pressedColorInput = new EditText(getContext()); pressedColorInput.setText(String.format("#%06X", (0xFFFFFF & btn.pressedColor))); pressedColorInput.setTextColor(Color.WHITE); pressedColorInput.setHint("按下颜色代码"); layout.addView(pressedColorInput);
+            final EditText colorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.color)), "常态颜色代码"); layout.addView(colorInput);
+            layout.addView(activity.createColorPalette(colorInput));
             
-            final EditText alphaInput = new EditText(getContext()); alphaInput.setText(String.valueOf(btn.alpha)); alphaInput.setTextColor(Color.WHITE); alphaInput.setHint("透明度 0-255"); layout.addView(alphaInput);
-            final EditText radiusInput = new EditText(getContext()); radiusInput.setText(String.valueOf((int)btn.radius)); radiusInput.setTextColor(Color.WHITE); radiusInput.setHint("按键大小"); layout.addView(radiusInput);
+            final EditText pressedColorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.pressedColor)), "按下颜色代码"); layout.addView(pressedColorInput);
+            layout.addView(activity.createColorPalette(pressedColorInput));
 
-            Button pickImgBtn = new Button(getContext()); pickImgBtn.setText("选择自定义皮肤图片 (从图库)"); 
-            pickImgBtn.setOnClickListener(v -> {
-                currentlyEditingButton = btn;
-                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                intent.addCategory(Intent.CATEGORY_OPENABLE);
-                intent.setType("image/*");
-                activity.startActivityForResult(intent, 43); // 回调由 MainActivity 处理
-            });
-            layout.addView(pickImgBtn);
+            final EditText alphaInput = createBlackTextEdit(String.valueOf(btn.alpha), "透明度 0-255"); layout.addView(alphaInput);
+            final EditText radiusInput = createBlackTextEdit(String.valueOf((int)btn.radius), "按键大小"); layout.addView(radiusInput);
 
             Button turboBtn = new Button(getContext());
             turboBtn.setText(btn.isTurbo ? "🔥 连发已开启" : "⚪ 连发已关闭");
-            turboBtn.setOnClickListener(v -> { btn.isTurbo = !btn.isTurbo; turboBtn.setText(btn.isTurbo ? "🔥 连发已开启" : "⚪ 连发已关闭"); });
-            layout.addView(turboBtn);
+            turboBtn.setTextColor(Color.WHITE);
+            turboBtn.setBackgroundColor(btn.isTurbo ? Color.parseColor("#FF5722") : Color.parseColor("#555555"));
+            turboBtn.setOnClickListener(v -> { 
+                btn.isTurbo = !btn.isTurbo; 
+                turboBtn.setText(btn.isTurbo ? "🔥 连发已开启" : "⚪ 连发已关闭"); 
+                turboBtn.setBackgroundColor(btn.isTurbo ? Color.parseColor("#FF5722") : Color.parseColor("#555555"));
+            });
+            layout.addView(turboBtn, getStandardParams());
 
-            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存修改"); saveBtn.setBackgroundColor(Color.parseColor("#1976D2"));
+            // 标记是否正常保存退出
+            final boolean[] isSaved = {false};
+
+            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存修改"); saveBtn.setBackgroundColor(Color.parseColor("#1976D2")); saveBtn.setTextColor(Color.WHITE);
             saveBtn.setOnClickListener(v -> {
                 try {
                     btn.id = nameInput.getText().toString();
@@ -565,31 +661,59 @@ public class MainActivity extends Activity {
                     btn.alpha = Integer.parseInt(alphaInput.getText().toString());
                     btn.radius = Integer.parseInt(radiusInput.getText().toString());
                     btn.hitboxRadius = btn.radius * 1.5f;
+                    isSaved[0] = true;
                     saveConfig(); invalidate(); dialog.dismiss();
                 } catch(Exception e) { Toast.makeText(getContext(), "数据格式错误", Toast.LENGTH_SHORT).show(); }
             });
-            layout.addView(saveBtn);
+            layout.addView(saveBtn, getStandardParams());
 
-            Button delBtn = new Button(getContext()); delBtn.setText("🗑️ 删除此按键"); delBtn.setBackgroundColor(Color.parseColor("#F44336"));
-            delBtn.setOnClickListener(v -> { buttons.remove(btn); saveConfig(); invalidate(); dialog.dismiss(); });
-            layout.addView(delBtn);
+            Button delBtn = new Button(getContext()); delBtn.setText("🗑️ 删除此按键"); delBtn.setBackgroundColor(Color.parseColor("#F44336")); delBtn.setTextColor(Color.WHITE);
+            delBtn.setOnClickListener(v -> { 
+                isSaved[0] = true; buttons.remove(btn); saveConfig(); invalidate(); dialog.dismiss(); 
+            });
+            layout.addView(delBtn, getStandardParams());
 
             scroll.addView(layout);
             dialog.setContentView(scroll);
+            
+            android.view.Window window = dialog.getWindow();
+            if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
+            
+            // 防呆设计：点击弹窗外部的警告拦截
+            dialog.setCanceledOnTouchOutside(true);
+            dialog.setOnCancelListener(d -> {
+                if (!isSaved[0]) {
+                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("⚠️ 未保存修改")
+                        .setMessage("你点击了空白处，是否保存刚刚的按键修改？")
+                        .setPositiveButton("💾 保存", (dialogInterface, i) -> saveBtn.performClick())
+                        .setNeutralButton("🔙 继续修改", (dialogInterface, i) -> dialog.show())
+                        .setNegativeButton("❌ 不保存退出", (dialogInterface, i) -> dialog.dismiss())
+                        .show();
+                }
+            });
+            
             dialog.show();
         }
 
-        public void onImagePicked(Uri uri) {
-            if (currentlyEditingButton != null) {
-                try {
-                    InputStream is = getContext().getContentResolver().openInputStream(uri);
-                    currentlyEditingButton.customImageUri = uri.toString();
-                    currentlyEditingButton.skinBitmap = Bitmap.createScaledBitmap(BitmapFactory.decodeStream(is), (int)(currentlyEditingButton.radius*2), (int)(currentlyEditingButton.radius*2), true);
-                    is.close();
-                    saveConfig(); invalidate();
-                    Toast.makeText(getContext(), "皮肤应用成功！", Toast.LENGTH_SHORT).show();
-                } catch (Exception e) {}
-            }
+        private EditText createBlackTextEdit(String text, String hint) {
+            EditText et = new EditText(getContext());
+            et.setText(text);
+            et.setHint(hint);
+            et.setTextColor(Color.BLACK);
+            et.setHintTextColor(Color.GRAY);
+            et.setBackgroundColor(Color.WHITE);
+            et.setPadding(30, 20, 30, 20);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 15, 0, 15);
+            et.setLayoutParams(lp);
+            return et;
+        }
+        
+        private LinearLayout.LayoutParams getStandardParams() {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120);
+            lp.setMargins(0, 20, 0, 10);
+            return lp;
         }
 
         // ================= 持久化逻辑 =================
@@ -602,7 +726,6 @@ public class MainActivity extends Activity {
                     obj.put("radius", b.radius); obj.put("color", b.color);
                     obj.put("pressedColor", b.pressedColor); obj.put("alpha", b.alpha);
                     obj.put("keyMap", b.keyMapStr); obj.put("isTurbo", b.isTurbo);
-                    obj.put("skin", b.customImageUri == null ? "" : b.customImageUri);
                     obj.put("shape", b.shape);
                     array.put(obj);
                 }
@@ -613,8 +736,7 @@ public class MainActivity extends Activity {
         private void loadConfig() {
             String json = prefs.getString("layout", null);
             isMouseMode = prefs.getBoolean("mouseMode", false);
-            if (json == null) {
-                // 默认在线游戏配置，包含鼠标 L/R
+            if (json == null || json.equals("[]")) {
                 buttons.add(new VirtualButton("UP", 200, 500, 80, "ArrowUp"));
                 buttons.add(new VirtualButton("DOWN", 200, 800, 80, "ArrowDown"));
                 buttons.add(new VirtualButton("LEFT", 50, 650, 80, "ArrowLeft"));
@@ -631,12 +753,7 @@ public class MainActivity extends Activity {
                         VirtualButton btn = new VirtualButton(o.optString("id"), (float)o.optDouble("cx"), (float)o.optDouble("cy"), (float)o.optDouble("radius"), o.optString("keyMap"));
                         btn.color = o.optInt("color", Color.GRAY); btn.pressedColor = o.optInt("pressedColor", Color.WHITE);
                         btn.alpha = o.optInt("alpha", 150); btn.isTurbo = o.optBoolean("isTurbo", false);
-                        btn.customImageUri = o.optString("skin", ""); btn.shape = o.optInt("shape", 0);
-                        if (!btn.customImageUri.isEmpty()) {
-                            try { InputStream is = getContext().getContentResolver().openInputStream(Uri.parse(btn.customImageUri));
-                                btn.skinBitmap = Bitmap.createScaledBitmap(BitmapFactory.decodeStream(is), (int)(btn.radius*2), (int)(btn.radius*2), true);
-                                is.close(); } catch(Exception e) {}
-                        }
+                        btn.shape = o.optInt("shape", 0);
                         buttons.add(btn);
                     }
                 } catch (Exception e) {}
@@ -667,14 +784,6 @@ public class MainActivity extends Activity {
                 });
             }
             public void stopTurbo() { turboRunning = false; }
-        }
-    }
-
-    // 接收系统图库选择返回
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == 43 && resultCode == RESULT_OK && data != null && gamepadView != null) {
-            gamepadView.onImagePicked(data.getData());
         }
     }
 }
