@@ -129,7 +129,64 @@ public class MainActivity extends Activity {
     }
 
     private void loadLocalCore(String type) {
-        Toast.makeText(this, "正在调用本地 " + type + " 核心... (需后续补全本地文件解析引擎)", Toast.LENGTH_SHORT).show();
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, type.equals("swf") ? 101 : 102);
+        Toast.makeText(this, "请选择本地的 ." + type + " 游戏文件", Toast.LENGTH_LONG).show();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            if (requestCode == 101) { 
+                loadSwfWithRuffle(uri); // 调用 SWF 解析
+            } else if (requestCode == 102) { 
+                Toast.makeText(this, "本地 Java 游戏容器接口预留完成，后续引入 JS2ME / CheerpJ 环境即可。", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void loadSwfWithRuffle(Uri uri) {
+        // 利用 Ruffle (WASM) 黑科技，将本地 Flash 无缝转换为 H5 游戏并注入按键！
+        try {
+            InputStream is = getContentResolver().openInputStream(uri);
+            byte[] bytes = new byte[is.available()];
+            is.read(bytes);
+            is.close();
+            String base64Swf = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
+            
+            String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
+                    "<style>body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: black; overflow: hidden; }</style>" +
+                    "<script src='https://unpkg.com/@ruffle-rs/ruffle'></script></head><body>" +
+                    "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
+                    "<script>" +
+                    "window.RufflePlayer = window.RufflePlayer || {};" +
+                    "window.addEventListener('load', (event) => {" +
+                    "  const ruffle = window.RufflePlayer.newest();" +
+                    "  const player = ruffle.createPlayer();" +
+                    "  const container = document.getElementById('ruffle-container');" +
+                    "  container.appendChild(player);" +
+                    "  player.style.width = '100%';" +
+                    "  player.style.height = '100%';" +
+                    "  player.load({data: Uint8Array.from(atob('" + base64Swf + "'), c => c.charCodeAt(0))});" +
+                    "});" +
+                    "</script></body></html>";
+            
+            rootLayout.removeAllViews();
+            webView.loadDataWithBaseURL("https://localhost", html, "text/html", "UTF-8", null);
+            rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            
+            if (gamepadView == null) gamepadView = new GamepadView(this, webView);
+            rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            setupImmersive();
+            Toast.makeText(this, "Ruffle Flash 核心注入成功！即将运行本地 SWF！", Toast.LENGTH_SHORT).show();
+            
+        } catch (Exception e) {
+            Toast.makeText(this, "文件读取失败，可能没有权限", Toast.LENGTH_SHORT).show();
+        }
     }
 
     // ================= URL 弹窗与预设颜色工具 =================
@@ -266,8 +323,10 @@ public class MainActivity extends Activity {
         private boolean isDraggingMenu = false;
         private boolean isMenuDown = false;
 
-        // 虚拟鼠标引擎
+        // 虚拟鼠标引擎与模式切换
         public boolean isMouseMode = false;
+        public boolean isPureTouchMode = false; // 纯触屏模式变量
+        private boolean isDraggingJoy = false;  // 鼠标摇杆拖拽变量
         public float mouseX = 500, mouseY = 500;
         private float joyBaseX = 250, joyBaseY = 700, joyKnobX = 250, joyKnobY = 700;
         private float joyRadius = 150;
@@ -304,12 +363,23 @@ public class MainActivity extends Activity {
         }
         
         private void injectMouseClick(boolean isRight, boolean isDown) {
-            // H5 游戏需要真实的 down 和 up 状态才能识别按压
-            String action = isDown ? "mousedown" : "mouseup";
             String btnCode = isRight ? "2" : "0";
-            String js = "var el = document.elementFromPoint(" + mouseX + "," + mouseY + ") || document.body;" +
-                        "var ev = new MouseEvent('" + action + "', {bubbles: true, cancelable: true, clientX: " + mouseX + ", clientY: " + mouseY + ", button: " + btnCode + "});" +
-                        "el.dispatchEvent(ev);";
+            String t1 = isDown ? "touchstart" : "touchend";
+            String t2 = isDown ? "mousedown" : "mouseup";
+            String t3 = isDown ? "pointerdown" : "pointerup";
+            
+            // 三合一物理模拟，强制穿透所有 H5 游戏引擎
+            String js = "try { " +
+                        "  var el = document.elementFromPoint(" + mouseX + "," + mouseY + ") || document.body;" +
+                        "  var touchObj = new Touch({identifier: 0, target: el, clientX: " + mouseX + ", clientY: " + mouseY + "});" +
+                        "  var touchEv = new TouchEvent('" + t1 + "', {bubbles: true, cancelable: true, touches: [" + (isDown?"touchObj":"") + "], targetTouches: [" + (isDown?"touchObj":"") + "], changedTouches: [touchObj]});" +
+                        "  var mouseEv = new MouseEvent('" + t2 + "', {bubbles: true, cancelable: true, clientX: " + mouseX + ", clientY: " + mouseY + ", button: " + btnCode + "});" +
+                        "  var pointerEv = new PointerEvent('" + t3 + "', {bubbles: true, cancelable: true, clientX: " + mouseX + ", clientY: " + mouseY + ", button: " + btnCode + ", pointerType: 'touch'});" +
+                        "  el.dispatchEvent(pointerEv);" +
+                        "  el.dispatchEvent(touchEv);" +
+                        "  el.dispatchEvent(mouseEv);" +
+                        "  if (!" + isDown + ") { el.click(); }" + // 松开时补充一个纯粹的click
+                        "} catch(e) {}";
             activity.runOnUiThread(() -> targetEngine.evaluateJavascript(js, null));
         }
 
@@ -317,6 +387,16 @@ public class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
+
+            // 纯触屏模式下，直接隐藏其余所有按键，只保留悬浮齿轮
+            if (isPureTouchMode && !isEditMode) {
+                menuRect.set(menuX, menuY, menuX + 150, menuY + 150);
+                paintBtn.setColor(Color.parseColor("#444444")); paintBtn.setAlpha(150);
+                canvas.drawRoundRect(menuRect, 30, 30, paintBtn);
+                paintText.setColor(Color.WHITE); paintText.setTextSize(50);
+                canvas.drawText("⚙️", menuRect.centerX(), menuRect.centerY() + 18, paintText);
+                return; // 拦截，不再绘制下面的摇杆和按键
+            }
             
             // 绘制悬浮菜单按钮
             menuRect.set(menuX, menuY, menuX + 150, menuY + 150);
@@ -401,12 +481,15 @@ public class MainActivity extends Activity {
             }
             if (action == MotionEvent.ACTION_MOVE && isDraggingMenu) {
                 if (Math.hypot(event.getX(actionIndex) - downX, event.getY(actionIndex) - downY) > 20) isMenuDown = false;
-                menuX = event.getX(actionIndex) - 75; menuY = event.getY(actionIndex) - 75; invalidate();
+                menuX = event.getX(actionIndex) - 75; menuY = event.getY(actionIndex) - 75; invalidate(); return true;
             }
             if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && isDraggingMenu) {
                 if (isMenuDown) showFloatingToolMenu();
                 isDraggingMenu = false; return true;
             }
+
+            // 如果是纯触屏模式，停止拦截所有手势，直接把事件放行给底层的 WebView
+            if (isPureTouchMode) return false; 
 
             // 鼠标摇杆逻辑
             if (isMouseMode) {
@@ -482,15 +565,26 @@ public class MainActivity extends Activity {
                     invalidate(); return;
                 }
                 downX = x; downY = y;
+                // 新增：检测是否点中了左侧鼠标摇杆区
+                if (isMouseMode && Math.hypot(x - joyBaseX, y - joyBaseY) < joyRadius * 1.5f) {
+                    isDraggingJoy = true;
+                    return;
+                }
                 for (int i = buttons.size() - 1; i >= 0; i--) {
                     if (Math.hypot(x - buttons.get(i).cx, y - buttons.get(i).cy) < buttons.get(i).radius * 1.5f) {
                         draggedButton = buttons.get(i); break;
                     }
                 }
-            } else if (action == MotionEvent.ACTION_MOVE && draggedButton != null) {
-                draggedButton.cx = x; draggedButton.cy = y; invalidate();
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                if (isDraggingJoy) {
+                    joyBaseX = x; joyBaseY = y; joyKnobX = x; joyKnobY = y; invalidate();
+                } else if (draggedButton != null) {
+                    draggedButton.cx = x; draggedButton.cy = y; invalidate();
+                }
             } else if (action == MotionEvent.ACTION_UP) {
-                if (draggedButton != null && Math.hypot(x - downX, y - downY) < 10) {
+                if (isDraggingJoy) {
+                    isDraggingJoy = false; saveConfig();
+                } else if (draggedButton != null && Math.hypot(x - downX, y - downY) < 10) {
                     showButtonSettingsDialog(draggedButton);
                 }
                 draggedButton = null;
@@ -518,6 +612,13 @@ public class MainActivity extends Activity {
                 isEditMode = true; dialog.dismiss(); invalidate(); 
             }));
             layout.addView(createMenuButton(isMouseMode ? "🖱️ 关闭鼠标模式" : "🖱️ 开启鼠标指针模式", v -> { isMouseMode = !isMouseMode; saveConfig(); dialog.dismiss(); invalidate(); }));
+            
+            layout.addView(createMenuButton(isPureTouchMode ? "🎮 退出触屏模式 (恢复手柄)" : "👆 开启纯触屏模式 (隐去按键)", v -> { 
+                isPureTouchMode = !isPureTouchMode; 
+                dialog.dismiss(); 
+                invalidate(); 
+                Toast.makeText(getContext(), isPureTouchMode ? "已开启纯触屏模式，可直接操作网页" : "已恢复虚拟按键", Toast.LENGTH_SHORT).show();
+            }));
             
             // 屏幕方向控制
             String currentOri = activity.screenOrientationMode == 0 ? "横屏" : (activity.screenOrientationMode == 1 ? "竖屏" : "自动识别");
@@ -628,162 +729,4 @@ public class MainActivity extends Activity {
             final EditText nameInput = createBlackTextEdit(btn.id, "按键名称 (L-Click/R-Click为鼠标专有)"); layout.addView(nameInput);
             final EditText keyInput = createBlackTextEdit(btn.keyMapStr, "映射键值 (如 A 或 A+B)"); layout.addView(keyInput);
             
-            final EditText colorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.color)), "常态颜色代码"); layout.addView(colorInput);
-            layout.addView(activity.createColorPalette(colorInput));
-            
-            final EditText pressedColorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.pressedColor)), "按下颜色代码"); layout.addView(pressedColorInput);
-            layout.addView(activity.createColorPalette(pressedColorInput));
-
-            final EditText alphaInput = createBlackTextEdit(String.valueOf(btn.alpha), "透明度 0-255"); layout.addView(alphaInput);
-            final EditText radiusInput = createBlackTextEdit(String.valueOf((int)btn.radius), "按键大小"); layout.addView(radiusInput);
-
-            Button turboBtn = new Button(getContext());
-            turboBtn.setText(btn.isTurbo ? "🔥 连发已开启" : "⚪ 连发已关闭");
-            turboBtn.setTextColor(Color.WHITE);
-            turboBtn.setBackgroundColor(btn.isTurbo ? Color.parseColor("#FF5722") : Color.parseColor("#555555"));
-            turboBtn.setOnClickListener(v -> { 
-                btn.isTurbo = !btn.isTurbo; 
-                turboBtn.setText(btn.isTurbo ? "🔥 连发已开启" : "⚪ 连发已关闭"); 
-                turboBtn.setBackgroundColor(btn.isTurbo ? Color.parseColor("#FF5722") : Color.parseColor("#555555"));
-            });
-            layout.addView(turboBtn, getStandardParams());
-
-            // 标记是否正常保存退出
-            final boolean[] isSaved = {false};
-
-            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存修改"); saveBtn.setBackgroundColor(Color.parseColor("#1976D2")); saveBtn.setTextColor(Color.WHITE);
-            saveBtn.setOnClickListener(v -> {
-                try {
-                    btn.id = nameInput.getText().toString();
-                    btn.keyMapStr = keyInput.getText().toString();
-                    btn.color = Color.parseColor(colorInput.getText().toString());
-                    btn.pressedColor = Color.parseColor(pressedColorInput.getText().toString());
-                    btn.alpha = Integer.parseInt(alphaInput.getText().toString());
-                    btn.radius = Integer.parseInt(radiusInput.getText().toString());
-                    btn.hitboxRadius = btn.radius * 1.5f;
-                    isSaved[0] = true;
-                    saveConfig(); invalidate(); dialog.dismiss();
-                } catch(Exception e) { Toast.makeText(getContext(), "数据格式错误", Toast.LENGTH_SHORT).show(); }
-            });
-            layout.addView(saveBtn, getStandardParams());
-
-            Button delBtn = new Button(getContext()); delBtn.setText("🗑️ 删除此按键"); delBtn.setBackgroundColor(Color.parseColor("#F44336")); delBtn.setTextColor(Color.WHITE);
-            delBtn.setOnClickListener(v -> { 
-                isSaved[0] = true; buttons.remove(btn); saveConfig(); invalidate(); dialog.dismiss(); 
-            });
-            layout.addView(delBtn, getStandardParams());
-
-            scroll.addView(layout);
-            dialog.setContentView(scroll);
-            
-            android.view.Window window = dialog.getWindow();
-            if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
-            
-            // 防呆设计：点击弹窗外部的警告拦截
-            dialog.setCanceledOnTouchOutside(true);
-            dialog.setOnCancelListener(d -> {
-                if (!isSaved[0]) {
-                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("⚠️ 未保存修改")
-                        .setMessage("你点击了空白处，是否保存刚刚的按键修改？")
-                        .setPositiveButton("💾 保存", (dialogInterface, i) -> saveBtn.performClick())
-                        .setNeutralButton("🔙 继续修改", (dialogInterface, i) -> dialog.show())
-                        .setNegativeButton("❌ 不保存退出", (dialogInterface, i) -> dialog.dismiss())
-                        .show();
-                }
-            });
-            
-            dialog.show();
-        }
-
-        private EditText createBlackTextEdit(String text, String hint) {
-            EditText et = new EditText(getContext());
-            et.setText(text);
-            et.setHint(hint);
-            et.setTextColor(Color.BLACK);
-            et.setHintTextColor(Color.GRAY);
-            et.setBackgroundColor(Color.WHITE);
-            et.setPadding(30, 20, 30, 20);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.setMargins(0, 15, 0, 15);
-            et.setLayoutParams(lp);
-            return et;
-        }
-        
-        private LinearLayout.LayoutParams getStandardParams() {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120);
-            lp.setMargins(0, 20, 0, 10);
-            return lp;
-        }
-
-        // ================= 持久化逻辑 =================
-        private void saveConfig() {
-            try {
-                JSONArray array = new JSONArray();
-                for (VirtualButton b : buttons) {
-                    JSONObject obj = new JSONObject();
-                    obj.put("id", b.id); obj.put("cx", b.cx); obj.put("cy", b.cy);
-                    obj.put("radius", b.radius); obj.put("color", b.color);
-                    obj.put("pressedColor", b.pressedColor); obj.put("alpha", b.alpha);
-                    obj.put("keyMap", b.keyMapStr); obj.put("isTurbo", b.isTurbo);
-                    obj.put("shape", b.shape);
-                    array.put(obj);
-                }
-                prefs.edit().putString("layout", array.toString()).putBoolean("mouseMode", isMouseMode).apply();
-            } catch (Exception e) {}
-        }
-
-        private void loadConfig() {
-            String json = prefs.getString("layout", null);
-            isMouseMode = prefs.getBoolean("mouseMode", false);
-            if (json == null || json.equals("[]")) {
-                buttons.add(new VirtualButton("UP", 200, 500, 80, "ArrowUp"));
-                buttons.add(new VirtualButton("DOWN", 200, 800, 80, "ArrowDown"));
-                buttons.add(new VirtualButton("LEFT", 50, 650, 80, "ArrowLeft"));
-                buttons.add(new VirtualButton("RIGHT", 350, 650, 80, "ArrowRight"));
-                buttons.add(new VirtualButton("A", 1600, 650, 90, "a"));
-                buttons.add(new VirtualButton("B", 1800, 500, 90, "b"));
-                buttons.add(new VirtualButton("L-Click", 1800, 800, 80, ""));
-                buttons.add(new VirtualButton("R-Click", 1600, 400, 80, ""));
-            } else {
-                try {
-                    JSONArray array = new JSONArray(json);
-                    for (int i = 0; i < array.length(); i++) {
-                        JSONObject o = array.getJSONObject(i);
-                        VirtualButton btn = new VirtualButton(o.optString("id"), (float)o.optDouble("cx"), (float)o.optDouble("cy"), (float)o.optDouble("radius"), o.optString("keyMap"));
-                        btn.color = o.optInt("color", Color.GRAY); btn.pressedColor = o.optInt("pressedColor", Color.WHITE);
-                        btn.alpha = o.optInt("alpha", 150); btn.isTurbo = o.optBoolean("isTurbo", false);
-                        btn.shape = o.optInt("shape", 0);
-                        buttons.add(btn);
-                    }
-                } catch (Exception e) {}
-            }
-        }
-
-        // ================= 内置按钮实体 =================
-        public static class VirtualButton {
-            public String id; public float cx, cy, radius, hitboxRadius;
-            public String keyMapStr; public boolean isPressed = false;
-            public int color = Color.GRAY, pressedColor = Color.WHITE, alpha = 150, shape = 0, textColor = Color.WHITE;
-            public String customImageUri = ""; public Bitmap skinBitmap = null;
-            public boolean isTurbo = false; public int turboInterval = 50;
-            private volatile boolean turboRunning = false;
-            private static final ExecutorService threadPool = Executors.newCachedThreadPool();
-
-            public VirtualButton(String id, float cx, float cy, float radius, String keyMapStr) {
-                this.id = id; this.cx = cx; this.cy = cy; this.radius = radius; this.keyMapStr = keyMapStr; this.hitboxRadius = radius * 1.5f;
-            }
-
-            public void startTurbo(GamepadView parentView) {
-                if (turboRunning || keyMapStr == null || keyMapStr.isEmpty()) return;
-                turboRunning = true;
-                threadPool.execute(() -> {
-                    while (turboRunning) {
-                        try { parentView.injectKeyEvent(keyMapStr, true); Thread.sleep(turboInterval); parentView.injectKeyEvent(keyMapStr, false); Thread.sleep(turboInterval); } catch (InterruptedException e) { break; }
-                    }
-                });
-            }
-            public void stopTurbo() { turboRunning = false; }
-        }
-    }
-}
+            final EditText 
