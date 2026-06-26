@@ -129,7 +129,64 @@ public class MainActivity extends Activity {
     }
 
     private void loadLocalCore(String type) {
-        Toast.makeText(this, "正在调用本地 " + type + " 核心... (需后续补全本地文件解析引擎)", Toast.LENGTH_SHORT).show();
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        startActivityForResult(intent, type.equals("swf") ? 101 : 102);
+        Toast.makeText(this, "请选择本地的 ." + type + " 游戏文件", Toast.LENGTH_LONG).show();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            if (requestCode == 101) { 
+                loadSwfWithRuffle(uri); // 调用 SWF 解析
+            } else if (requestCode == 102) { 
+                Toast.makeText(this, "本地 Java 游戏容器接口预留完成，后续引入 JS2ME / CheerpJ 环境即可。", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void loadSwfWithRuffle(Uri uri) {
+        // 利用 Ruffle (WASM) 黑科技，将本地 Flash 无缝转换为 H5 游戏并注入按键！
+        try {
+            InputStream is = getContentResolver().openInputStream(uri);
+            byte[] bytes = new byte[is.available()];
+            is.read(bytes);
+            is.close();
+            String base64Swf = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
+            
+            String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
+                    "<style>body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: black; overflow: hidden; }</style>" +
+                    "<script src='https://unpkg.com/@ruffle-rs/ruffle'></script></head><body>" +
+                    "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
+                    "<script>" +
+                    "window.RufflePlayer = window.RufflePlayer || {};" +
+                    "window.addEventListener('load', (event) => {" +
+                    "  const ruffle = window.RufflePlayer.newest();" +
+                    "  const player = ruffle.createPlayer();" +
+                    "  const container = document.getElementById('ruffle-container');" +
+                    "  container.appendChild(player);" +
+                    "  player.style.width = '100%';" +
+                    "  player.style.height = '100%';" +
+                    "  player.load({data: Uint8Array.from(atob('" + base64Swf + "'), c => c.charCodeAt(0))});" +
+                    "});" +
+                    "</script></body></html>";
+            
+            rootLayout.removeAllViews();
+            webView.loadDataWithBaseURL("https://localhost", html, "text/html", "UTF-8", null);
+            rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            
+            if (gamepadView == null) gamepadView = new GamepadView(this, webView);
+            rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            setupImmersive();
+            Toast.makeText(this, "Ruffle Flash 核心注入成功！即将运行本地 SWF！", Toast.LENGTH_SHORT).show();
+            
+        } catch (Exception e) {
+            Toast.makeText(this, "文件读取失败，可能没有权限", Toast.LENGTH_SHORT).show();
+        }
     }
 
     // ================= URL 弹窗与预设颜色工具 =================
