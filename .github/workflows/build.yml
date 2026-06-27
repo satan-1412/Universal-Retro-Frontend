@@ -1,8 +1,6 @@
-name: Build Android APK (Max Performance)
+name: Manual Build RetroWeb Pro
 on:
-  push:
-    branches: [ "main" ]
-  workflow_dispatch:
+  workflow_dispatch: # 核心修改：只允许手动触发构建，防封号防滥用
 
 jobs:
   build:
@@ -17,55 +15,44 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    # 核心魔改：云端强行注入 Android 项目脚手架，免去你手动建文件的烦恼
+    # 核心二步：在云端自动下载最新的 Ruffle 离线核心到 App 的内置资源中
+    - name: Fetch Local Emulation Cores
+      run: |
+        mkdir -p app/src/main/assets/ruffle
+        echo "正在拉取最强 Flash WebAssembly 离线核心..."
+        wget -qO ruffle.zip https://github.com/ruffle-rs/ruffle/releases/latest/download/ruffle-web-selfhosted.zip
+        unzip -q ruffle.zip -d app/src/main/assets/ruffle/
+        rm ruffle.zip
+        echo "Java KEmulator 等核心也可以在此处扩充..."
+
     - name: Auto-Scaffold Android Environment
       run: |
-        # 1. 生成 settings.gradle (告诉编译器我们有个叫 app 的模块)
         cat << 'EOF' > settings.gradle
-        pluginManagement {
-            repositories {
-                google()
-                mavenCentral()
-                gradlePluginPortal()
-            }
-        }
-        dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-            repositories {
-                google()
-                mavenCentral()
-            }
-        }
+        pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+        dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
         include ':app'
         EOF
         
-        # 2. 生成根目录 build.gradle (指定安卓编译插件 AGP 8.2.2)
         cat << 'EOF' > build.gradle
-        plugins {
-            id 'com.android.application' version '8.2.2' apply false
-        }
+        plugins { id 'com.android.application' version '8.2.2' apply false }
         EOF
         
-        # 3. 生成 gradle.properties (开启 AndroidX 和 6GB 极限内存超频)
         cat << 'EOF' > gradle.properties
         org.gradle.jvmargs=-Xmx6g -XX:+UseParallelGC
         android.useAndroidX=true
         EOF
 
-    # 弃用缺失的 gradlew，直接让 GitHub 官方动作帮我们装一个全局的 Gradle 8.5
     - name: Setup Global Gradle Environment
       uses: gradle/actions/setup-gradle@v4
       with:
         gradle-version: '8.5'
 
-    # 直接使用全局 gradle 命令进行多核并行编译
     - name: Build APK (Overclocked)
       run: gradle assembleDebug --parallel --build-cache
 
-    # 0 级压缩，秒速上传产物
     - name: Upload APK
       uses: actions/upload-artifact@v4
       with:
-        name: app-debug
+        name: RetroWeb-Pro
         path: app/build/outputs/apk/debug/app-debug.apk
         compression-level: 0
