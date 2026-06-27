@@ -28,6 +28,8 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -43,7 +45,9 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -51,19 +55,25 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private FrameLayout rootLayout;
-    private WebView webView;
+    public WebView webView;
     private GamepadView gamepadView;
     private long backPressedTime = 0;
-    private boolean isDarkMode = false;
-    private SharedPreferences prefs;
+    public SharedPreferences prefs;
 
-    // 自定义外观与模式
+    // 当前运行的引擎模式: 0=空闲, 1=Web网页, 2=本地Flash, 3=本地Java
+    public int currentEngineMode = 0;
+    
+    // 独立设置参数
     public int inputBgColor = Color.WHITE;
     public int inputTextColor = Color.BLACK;
     public int screenOrientationMode = 0; // 0=横屏, 1=竖屏, 2=自动
-    public int uaMode = 0; // 0=手机, 1=电脑, 2=平板
+    public int webUAMode = 0; // Web专属: 0=手机, 1=电脑, 2=平板
+    public int flashCoreMode = 0; // Flash专属: 0=Ruffle(WASM), 1=LightSpark
+    public int javaCoreMode = 0; // Java专属: 0=KEmulator, 1=CheerpJ
+    
+    // 用于本地流媒体拦截的 URI
+    private Uri pendingLocalGameUri = null;
 
-    // 预设 UA 字符串
     private static final String UA_MOBILE = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
     private static final String UA_PC = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     private static final String UA_TABLET = "Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1";
@@ -75,7 +85,10 @@ public class MainActivity extends Activity {
         inputBgColor = prefs.getInt("inputBgColor", Color.WHITE);
         inputTextColor = prefs.getInt("inputTextColor", Color.BLACK);
         screenOrientationMode = prefs.getInt("screenOrientation", 0);
-        uaMode = prefs.getInt("uaMode", 0);
+        webUAMode = prefs.getInt("webUAMode", 0);
+        flashCoreMode = prefs.getInt("flashCoreMode", 0);
+        javaCoreMode = prefs.getInt("javaCoreMode", 0);
+        
         applyScreenOrientation();
 
         rootLayout = new FrameLayout(this);
@@ -100,6 +113,7 @@ public class MainActivity extends Activity {
 
     // ================= 3模式启动器 =================
     public void showStartupSelector() {
+        currentEngineMode = 0;
         setupImmersive();
         rootLayout.removeAllViews();
         LinearLayout layout = new LinearLayout(this);
@@ -117,119 +131,49 @@ public class MainActivity extends Activity {
             String lastUrl = prefs.getString("lastUrl", "");
             showUrlInputDialog(lastUrl);
         }));
-        layout.addView(createBigButton("🎞️ 本地 Flash (.swf) 播放器", v -> loadLocalCore("swf")));
-        layout.addView(createBigButton("☕ 本地 Java (.jar) 模拟器", v -> loadLocalCore("jar")));
+        layout.addView(createBigButton("🎞️ 本地 Flash (.swf) 播放器", v -> {
+            currentEngineMode = 2; loadLocalFile("*/*", 101);
+        }));
+        layout.addView(createBigButton("☕ 本地 Java (.jar) 模拟器", v -> {
+            currentEngineMode = 3; loadLocalFile("*/*", 102);
+        }));
 
         rootLayout.addView(layout);
     }
 
     private Button createBigButton(String text, View.OnClickListener listener) {
         Button btn = new Button(this);
-        btn.setText(text);
-        btn.setTextColor(Color.WHITE);
-        btn.setTextSize(18f);
+        btn.setText(text); btn.setTextColor(Color.WHITE); btn.setTextSize(18f);
         btn.setBackgroundColor(Color.parseColor("#333333"));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(800, 150);
-        params.setMargins(0, 20, 0, 20);
-        btn.setLayoutParams(params);
-        btn.setOnClickListener(listener);
-        return btn;
+        params.setMargins(0, 20, 0, 20); btn.setLayoutParams(params);
+        btn.setOnClickListener(listener); return btn;
     }
 
-    private void loadLocalCore(String type) {
+    private void loadLocalFile(String type, int requestCode) {
         Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, type.equals("swf") ? 101 : 102);
-        Toast.makeText(this, "请选择本地的 ." + type + " 游戏文件", Toast.LENGTH_LONG).show();
+        intent.setType(type);
+        startActivityForResult(intent, requestCode);
+        Toast.makeText(this, "请选择本地游戏文件", Toast.LENGTH_LONG).show();
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode == RESULT_OK && data != null && data.getData() != null) {
-            Uri uri = data.getData();
+            pendingLocalGameUri = data.getData();
             if (requestCode == 101) { 
-                loadSwfWithRuffle(uri); 
+                currentEngineMode = 2;
+                startGameContainer("https://app.local/flash_player.html"); 
             } else if (requestCode == 102) { 
-                loadJarWithEmulator(uri); // 触发 Java 解析引擎
-            } else if (requestCode == 43 && gamepadView != null) {
-                // 用于后续选皮肤 (此处为后续移植你的皮肤选择器留口)
+                currentEngineMode = 3;
+                startGameContainer("https://app.local/java_player.html"); 
             }
         }
     }
 
-    private void loadSwfWithRuffle(Uri uri) {
-        try {
-            InputStream is = getContentResolver().openInputStream(uri);
-            byte[] bytes = new byte[is.available()];
-            is.read(bytes);
-            is.close();
-            String base64Swf = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
-            
-            String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
-                    "<style>body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: black; overflow: hidden; }</style>" +
-                    "<script src='https://unpkg.com/@ruffle-rs/ruffle'></script></head><body>" +
-                    "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
-                    "<script>" +
-                    "window.RufflePlayer = window.RufflePlayer || {};" +
-                    "window.addEventListener('load', (event) => {" +
-                    "  const ruffle = window.RufflePlayer.newest();" +
-                    "  const player = ruffle.createPlayer();" +
-                    "  const container = document.getElementById('ruffle-container');" +
-                    "  container.appendChild(player);" +
-                    "  player.style.width = '100%'; player.style.height = '100%';" +
-                    "  player.load({data: Uint8Array.from(atob('" + base64Swf + "'), c => c.charCodeAt(0))});" +
-                    "});" +
-                    "</script></body></html>";
-            
-            rootLayout.removeAllViews();
-            webView.loadDataWithBaseURL("https://localhost", html, "text/html", "UTF-8", null);
-            rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            if (gamepadView == null) gamepadView = new GamepadView(this, webView);
-            rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            setupImmersive();
-            Toast.makeText(this, "Ruffle 核心注入成功！即将运行本地 SWF！", Toast.LENGTH_SHORT).show();
-        } catch (Exception e) { Toast.makeText(this, "文件读取失败，可能没有权限", Toast.LENGTH_SHORT).show(); }
-    }
-
-    // ================= Java (.jar) 本地解析引擎 =================
-    private void loadJarWithEmulator(Uri uri) {
-        try {
-            InputStream is = getContentResolver().openInputStream(uri);
-            byte[] bytes = new byte[is.available()];
-            is.read(bytes);
-            is.close();
-            String base64Jar = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
-            
-            // 采用基于 CheerpJ / KEmulator 架构的 Web J2ME 环境来运行本地 JAR
-            String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
-                    "<style>body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: black; overflow: hidden; display: flex; justify-content: center; align-items: center; }</style>" +
-                    "</head><body>" +
-                    "<div style='color:white; text-align:center; font-family:sans-serif;'>" +
-                    "<h2>☕ J2ME Core Initializing...</h2>" +
-                    "<p>正在解析 Java 字节码并构建 Dalvik/Web 映射...</p>" +
-                    "<p>（注意：高度复杂的 3D Java 游戏可能仍需原生 J2ME-Loader C++ 核心，我们已为您分配基础 2D Web 解析环境）</p></div>" +
-                    "<script>" +
-                    "// 这里未来可以接驳你部署在 Github Pages 的 KEmulator.js 核心\n" +
-                    "// 暂用 Base64 占位，确保文件流已被成功提取：" + base64Jar.substring(0, 20) + "..." +
-                    "</script></body></html>";
-            
-            rootLayout.removeAllViews();
-            webView.loadDataWithBaseURL("https://localhost", html, "text/html", "UTF-8", null);
-            rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            
-            if (gamepadView == null) gamepadView = new GamepadView(this, webView);
-            rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            setupImmersive();
-            Toast.makeText(this, "JAR 文件读取并封包成功！", Toast.LENGTH_SHORT).show();
-            
-        } catch (Exception e) {
-            Toast.makeText(this, "JAR 读取失败，请检查文件", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    // ================= URL 弹窗与预设颜色工具 =================
+    // ================= URL 输入弹窗 =================
     public void showUrlInputDialog(String defaultUrl) {
         Dialog dialog = new Dialog(this, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen);
         LinearLayout layout = new LinearLayout(this);
@@ -238,74 +182,36 @@ public class MainActivity extends Activity {
         layout.setBackgroundColor(Color.argb(200, 0, 0, 0));
 
         final EditText urlInput = new EditText(this);
-        urlInput.setText(defaultUrl);
-        urlInput.setTextColor(inputTextColor);
-        urlInput.setHint("输入网址 (会自动记忆)...");
-        urlInput.setHintTextColor(Color.GRAY);
+        urlInput.setText(defaultUrl); urlInput.setTextColor(inputTextColor);
+        urlInput.setHint("输入网址..."); urlInput.setHintTextColor(Color.GRAY);
         android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
-        bg.setColor(inputBgColor);
-        bg.setCornerRadius(15f);
-        urlInput.setBackground(bg);
+        bg.setColor(inputBgColor); bg.setCornerRadius(15f); urlInput.setBackground(bg);
         urlInput.setPadding(40, 40, 40, 40);
         layout.addView(urlInput, new LinearLayout.LayoutParams(900, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         Button goBtn = new Button(this);
-        goBtn.setText("🚀 载入网页引擎");
-        goBtn.setBackgroundColor(Color.parseColor("#4CAF50"));
-        goBtn.setTextColor(Color.WHITE);
+        goBtn.setText("🚀 载入网页引擎"); goBtn.setBackgroundColor(Color.parseColor("#4CAF50")); goBtn.setTextColor(Color.WHITE);
         goBtn.setOnClickListener(v -> {
             String url = urlInput.getText().toString();
             if (url.isEmpty()) return;
             if (!url.startsWith("http")) url = "https://" + url;
             prefs.edit().putString("lastUrl", url).apply(); 
             dialog.dismiss();
+            currentEngineMode = 1;
             startGameContainer(url);
         });
         
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(900, 130);
-        bp.setMargins(0, 40, 0, 0);
+        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(900, 130); bp.setMargins(0, 40, 0, 0);
         layout.addView(goBtn, bp);
         
         Button cancelBtn = new Button(this);
-        cancelBtn.setText("🔙 返回");
-        cancelBtn.setBackgroundColor(Color.parseColor("#777777"));
-        cancelBtn.setTextColor(Color.WHITE);
+        cancelBtn.setText("🔙 返回"); cancelBtn.setBackgroundColor(Color.parseColor("#777777")); cancelBtn.setTextColor(Color.WHITE);
         cancelBtn.setOnClickListener(v -> dialog.dismiss());
         layout.addView(cancelBtn, bp);
-
-        dialog.setContentView(layout);
-        dialog.show();
+        dialog.setContentView(layout); dialog.show();
     }
 
-    public HorizontalScrollView createColorPalette(EditText targetInput) {
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.HORIZONTAL);
-        String[] colors = {"#FFFFFF", "#000000", "#F44336", "#4CAF50", "#2196F3", "#FFEB3B", "#9C27B0", "#795548", "#9E9E9E"};
-        for (String c : colors) {
-            Button btn = new Button(this);
-            btn.setBackgroundColor(Color.parseColor(c));
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(80, 80);
-            p.setMargins(10, 10, 10, 10);
-            btn.setLayoutParams(p);
-            btn.setOnClickListener(v -> targetInput.setText(c));
-            layout.addView(btn);
-        }
-        scroll.addView(layout);
-        return scroll;
-    }
-
-    private void startGameContainer(String url) {
-        rootLayout.removeAllViews();
-        applyUASettings(); // 应用 UA
-        webView.loadUrl(url);
-        rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        
-        if (gamepadView == null) gamepadView = new GamepadView(this, webView);
-        rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setupImmersive();
-    }
-
+    // ================= 核心：硬件加速与拦截引擎 =================
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
         webView = new WebView(this);
@@ -314,67 +220,147 @@ public class MainActivity extends Activity {
         settings.setDomStorageEnabled(true);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
-        // 允许跨域读取，这对本地运行网页引擎非常重要
         settings.setAllowFileAccessFromFileURLs(true);
         settings.setAllowUniversalAccessFromFileURLs(true);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        // 允许 WebAssembly 运行必备 (禁止媒体播放必须由用户点击触发)
+        settings.setMediaPlaybackRequiresUserGesture(false); 
 
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        // ================= 动态性能自适应引擎 =================
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) { 
+            // 安卓 8.0 (API 26) 及以上现代机型：火力全开
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            settings.setRenderPriority(WebSettings.RenderPriority.HIGH);
+            settings.setCacheMode(WebSettings.LOAD_NO_CACHE); // 本地直读不缓存
+        } else {
+            // 安卓 5/6/7 老爷机：防 OOM 闪退保护模式
+            // 老旧 WebView 的硬件加速极易导致白屏和内存溢出，强制降级为软件渲染保障不死机
+            webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+            settings.setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
+        }
+        // ======================================================
+
+        webView.setBackgroundColor(Color.BLACK);
         
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                String url = request.getUrl().toString();
+                
+                // 1. 核心路由：将网页或游戏对 Flash 核心的请求，强行重定向到我们刚刚打包进 APK 的离线文件！
+                if (url.startsWith("https://app.local/ruffle/")) {
+                    String assetPath = url.replace("https://app.local/", "");
+                    try {
+                        InputStream is = getAssets().open(assetPath);
+                        String mime = "application/javascript";
+                        // WebAssembly 对 MimeType 要求极其严格，必须是 application/wasm，否则核心崩溃
+                        if (assetPath.endsWith(".wasm")) mime = "application/wasm"; 
+                        else if (assetPath.endsWith(".json")) mime = "application/json";
+                        return new WebResourceResponse(mime, "UTF-8", is);
+                    } catch (Exception e) { e.printStackTrace(); }
+                }
+
+                // 2. 本地流媒体拦截：喂给浏览器大文件（几十MB的SWF不再闪退）
+                if (url.equals("https://app.local/stream_game_data") && pendingLocalGameUri != null) {
+                    try {
+                        InputStream is = getContentResolver().openInputStream(pendingLocalGameUri);
+                        return new WebResourceResponse("application/octet-stream", "UTF-8", is);
+                    } catch (Exception e) { e.printStackTrace(); }
+                }
+                
+                // 3. 自动生成本地 Flash 容器页面 (注意这里改成了调用离线本地核心)
+                if (url.equals("https://app.local/flash_player.html")) {
+                    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
+                            "<style>body,html{margin:0;padding:0;width:100%;height:100%;background:black;overflow:hidden;}</style>" +
+                            "<script src='https://app.local/ruffle/ruffle.js'></script></head><body>" + // <-- 离线极速读取
+                            "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
+                            "<script>" +
+                            "window.RufflePlayer = window.RufflePlayer || {};" +
+                            "window.addEventListener('load', () => {" +
+                            "  const ruffle = window.RufflePlayer.newest();" +
+                            "  const player = ruffle.createPlayer();" +
+                            "  document.getElementById('ruffle-container').appendChild(player);" +
+                            "  player.style.width = '100%'; player.style.height = '100%';" +
+                            "  player.load('https://app.local/stream_game_data');" +
+                            "});" +
+                            "</script></body></html>";
+                    return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
+                }
+
+                // 4. 自动生成本地 Java (J2ME) 容器页面
+                if (url.equals("https://app.local/java_player.html")) {
+                    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                            "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;}</style></head><body>" +
+                            "<h2>☕ Java/J2ME Core</h2><p>流媒体通道已就绪。</p><p>正在等待 Java 核心对接...</p>" +
+                            "</body></html>";
+                    return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
+                }
+
+                return super.shouldInterceptRequest(view, request);
+            }
+
+            // 网页 Flash 注入器 (调用离线核心)
+            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                // 核心黑科技：向任何打开的网页强行注入 Ruffle Flash 模拟器插件！
-                // 欺骗 4399 等网站，自动将网页里的 Flash 转换为 H5 画面
-                String ruffleInjection = "javascript:(function() {" +
-                        "if (window.ruffleInjected) return;" +
-                        "window.ruffleInjected = true;" +
+                if (currentEngineMode == 1) { 
+                    String js = "javascript:(function() {" +
+                        "if(window.injected)return; window.injected=true;" +
+                        "var script = document.createElement('script');" +
+                        "script.src = 'https://app.local/ruffle/ruffle.js';" + // <-- 离线极速读取
+                        "document.head.appendChild(script);" +
                         "window.RufflePlayer = window.RufflePlayer || {};" +
                         "window.RufflePlayer.config = { 'autoplay': 'on', 'unmuteOverlay': 'hidden' };" +
-                        "var script = document.createElement('script');" +
-                        "script.src = 'https://unpkg.com/@ruffle-rs/ruffle/ruffle.js';" +
-                        "document.head.appendChild(script);" +
-                        "})()";
-                view.evaluateJavascript(ruffleInjection, null);
+                        "var frames = document.getElementsByTagName('iframe');" +
+                        "for(var i=0; i<frames.length; i++) {" +
+                        "   try { frames[i].contentWindow.document.head.appendChild(script.cloneNode(true)); } catch(e){}" +
+                        "}})()";
+                    view.evaluateJavascript(js, null);
+                }
             }
         });
         
         webView.setWebChromeClient(new WebChromeClient());
-        webView.setBackgroundColor(Color.BLACK);
-        applyUASettings();
     }
 
-    public void applyUASettings() {
+
+    private void startGameContainer(String url) {
+        rootLayout.removeAllViews();
+        // 如果是 Web 模式才应用 UA
+        if (currentEngineMode == 1) applyWebUASettings(); 
+        
+        webView.loadUrl(url);
+        rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        
+        if (gamepadView == null) gamepadView = new GamepadView(this, webView);
+        gamepadView.isPureTouchMode = false; // 启动时重置为手柄模式
+        rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setupImmersive();
+    }
+
+    public void applyWebUASettings() {
         WebSettings settings = webView.getSettings();
-        if (uaMode == 1) settings.setUserAgentString(UA_PC);
-        else if (uaMode == 2) settings.setUserAgentString(UA_TABLET);
+        if (webUAMode == 1) settings.setUserAgentString(UA_PC);
+        else if (webUAMode == 2) settings.setUserAgentString(UA_TABLET);
         else settings.setUserAgentString(UA_MOBILE);
     }
 
     @Override
     public void onBackPressed() {
         if (gamepadView != null && gamepadView.isEditMode) {
-            Toast.makeText(this, "请先点击屏幕上方的【保存并退出编辑】", Toast.LENGTH_SHORT).show();
-            return;
+            Toast.makeText(this, "请先保存按键配置", Toast.LENGTH_SHORT).show(); return;
         }
         long now = System.currentTimeMillis();
-        if (now - backPressedTime < 2000) {
-            super.onBackPressed();
-        } else {
-            Toast.makeText(this, "再按一次退出 App", Toast.LENGTH_SHORT).show();
-            backPressedTime = now;
-        }
+        if (now - backPressedTime < 2000) { super.onBackPressed(); } 
+        else { Toast.makeText(this, "再按一次退出 App", Toast.LENGTH_SHORT).show(); backPressedTime = now; }
     }
 
     public void toggleWebTheme() {
         isDarkMode = !isDarkMode;
         String js = isDarkMode ? "document.body.style.filter = 'invert(1) hue-rotate(180deg)';" : "document.body.style.filter = 'none';";
         webView.evaluateJavascript(js, null);
-        Toast.makeText(this, isDarkMode ? "已切换至护眼暗色模式" : "已恢复亮色模式", Toast.LENGTH_SHORT).show();
     }
 
-    // ================= 核心：极低延迟虚拟按键引擎 =================
+    // ================= 极低延迟虚拟按键引擎 =================
     public static class GamepadView extends View {
         private MainActivity activity;
         private final WebView targetEngine;
@@ -382,8 +368,7 @@ public class MainActivity extends Activity {
         private final Paint paintText = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dashPaint = new Paint();
         private final List<VirtualButton> buttons = new ArrayList<>();
-        private final SharedPreferences prefs;
-
+        
         public boolean isEditMode = false;
         private VirtualButton draggedButton = null;
         private float downX, downY;
@@ -394,10 +379,9 @@ public class MainActivity extends Activity {
         private boolean isDraggingMenu = false;
         private boolean isMenuDown = false;
 
-        // 虚拟鼠标引擎与纯触屏模式
         public boolean isMouseMode = false;
-        public boolean isPureTouchMode = false; // 触屏模式变量
-        private boolean isDraggingJoy = false;  // 摇杆拖拽变量
+        public boolean isPureTouchMode = false; 
+        private boolean isDraggingJoy = false; 
         public float mouseX = 500, mouseY = 500;
         private float joyBaseX = 250, joyBaseY = 700, joyKnobX = 250, joyKnobY = 700;
         private float joyRadius = 150;
@@ -406,23 +390,14 @@ public class MainActivity extends Activity {
 
         public GamepadView(MainActivity context, WebView webView) {
             super(context);
-            this.activity = context;
-            this.targetEngine = webView;
+            this.activity = context; this.targetEngine = webView;
             vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
-            prefs = context.getSharedPreferences("IkemenGamepad_Pro_V8", MODE_PRIVATE);
-            
-            paintText.setTextAlign(Paint.Align.CENTER);
-            paintText.setTypeface(Typeface.DEFAULT_BOLD);
-            dashPaint.setStyle(Paint.Style.STROKE);
-            dashPaint.setStrokeWidth(4f);
-            dashPaint.setColor(Color.YELLOW);
-            
-            mousePaint.setColor(Color.RED);
-            mousePaint.setShadowLayer(5, 0, 0, Color.WHITE);
+            paintText.setTextAlign(Paint.Align.CENTER); paintText.setTypeface(Typeface.DEFAULT_BOLD);
+            dashPaint.setStyle(Paint.Style.STROKE); dashPaint.setStrokeWidth(4f); dashPaint.setColor(Color.YELLOW);
+            mousePaint.setColor(Color.RED); mousePaint.setShadowLayer(5, 0, 0, Color.WHITE);
             loadConfig();
         }
 
-        // --- 核心改动：键值转换器 ---
         private int getKeyCode(String k) {
             if(k.equals("UP")) return KeyEvent.KEYCODE_DPAD_UP;
             if(k.equals("DOWN")) return KeyEvent.KEYCODE_DPAD_DOWN;
@@ -442,7 +417,6 @@ public class MainActivity extends Activity {
             return KeyEvent.KEYCODE_UNKNOWN;
         }
 
-        // --- 核心改动：物理级键盘注入 (无视游戏防作弊) ---
         private void injectNativeKey(String keyString, boolean isDown) {
             if (keyString == null || keyString.isEmpty()) return;
             int action = isDown ? KeyEvent.ACTION_DOWN : KeyEvent.ACTION_UP;
@@ -450,16 +424,14 @@ public class MainActivity extends Activity {
                 int code = getKeyCode(key.trim().toUpperCase());
                 if (code != KeyEvent.KEYCODE_UNKNOWN) {
                     final KeyEvent event = new KeyEvent(action, code);
-                    activity.runOnUiThread(() -> targetEngine.dispatchKeyEvent(event)); // 物理级穿透！
+                    activity.runOnUiThread(() -> targetEngine.dispatchKeyEvent(event));
                 }
             }
         }
         
-        // --- 核心改动：物理级触摸模拟 (代替无效的 MouseEvent) ---
         private void injectNativeTouch(boolean isDown) {
             long time = SystemClock.uptimeMillis();
             int action = isDown ? MotionEvent.ACTION_DOWN : MotionEvent.ACTION_UP;
-            // 直接向网页派发真实的系统级触摸事件，任何H5引擎必定响应
             MotionEvent ev = MotionEvent.obtain(time, time, action, mouseX, mouseY, 0);
             activity.runOnUiThread(() -> targetEngine.dispatchTouchEvent(ev));
             ev.recycle();
@@ -475,81 +447,51 @@ public class MainActivity extends Activity {
                 canvas.drawRoundRect(menuRect, 30, 30, paintBtn);
                 paintText.setColor(Color.WHITE); paintText.setTextSize(50); paintText.clearShadowLayer();
                 canvas.drawText("⚙️", menuRect.centerX(), menuRect.centerY() + 18, paintText);
-                return; // 拦截，只画齿轮，不画摇杆和按键
+                return; 
             }
 
-            // 绘制悬浮菜单按钮
             menuRect.set(menuX, menuY, menuX + 150, menuY + 150);
-            paintBtn.setColor(Color.parseColor("#444444"));
-            paintBtn.setAlpha(150);
-            canvas.drawRoundRect(menuRect, 30, 30, paintBtn);
-            paintText.setColor(Color.WHITE);
-            paintText.setTextSize(50); paintText.clearShadowLayer();
+            paintBtn.setColor(Color.parseColor("#444444")); paintBtn.setAlpha(150); canvas.drawRoundRect(menuRect, 30, 30, paintBtn);
+            paintText.setColor(Color.WHITE); paintText.setTextSize(50); paintText.clearShadowLayer();
             canvas.drawText("⚙️", menuRect.centerX(), menuRect.centerY() + 18, paintText);
 
-            // 绘制虚拟鼠标
             if (isMouseMode) {
                 canvas.drawCircle(mouseX, mouseY, 15, mousePaint);
-                paintBtn.setColor(Color.parseColor("#333333"));
-                paintBtn.setAlpha(100);
-                canvas.drawCircle(joyBaseX, joyBaseY, joyRadius, paintBtn);
-                paintBtn.setColor(Color.WHITE);
-                paintBtn.setAlpha(150);
-                canvas.drawCircle(joyKnobX, joyKnobY, joyRadius * 0.4f, paintBtn);
-                if (isEditMode) {
-                    canvas.drawCircle(joyBaseX, joyBaseY, joyRadius * 1.5f, dashPaint);
-                }
+                paintBtn.setColor(Color.parseColor("#333333")); paintBtn.setAlpha(100); canvas.drawCircle(joyBaseX, joyBaseY, joyRadius, paintBtn);
+                paintBtn.setColor(Color.WHITE); paintBtn.setAlpha(150); canvas.drawCircle(joyKnobX, joyKnobY, joyRadius * 0.4f, paintBtn);
+                if (isEditMode) canvas.drawCircle(joyBaseX, joyBaseY, joyRadius * 1.5f, dashPaint);
             }
 
-            // 绘制所有按键
             for (VirtualButton btn : buttons) {
                 int currentAlpha = isEditMode ? 180 : (btn.isPressed ? 255 : btn.alpha);
-                
-                if (btn.skinBitmap != null && !btn.skinBitmap.isRecycled()) {
-                    paintBtn.setAlpha(currentAlpha);
-                    RectF r = new RectF(btn.cx - btn.radius, btn.cy - btn.radius, btn.cx + btn.radius, btn.cy + btn.radius);
-                    canvas.drawBitmap(btn.skinBitmap, null, r, paintBtn);
-                } else {
-                    int c = btn.isPressed ? btn.pressedColor : btn.color;
-                    paintBtn.setColor(c);
-                    paintBtn.setAlpha(currentAlpha);
-                    RadialGradient gradient = new RadialGradient(btn.cx - btn.radius * 0.3f, btn.cy - btn.radius * 0.3f, btn.radius * 1.2f, c, Color.BLACK, Shader.TileMode.CLAMP);
-                    paintBtn.setShader(gradient);
-                    if (btn.shape == 0) canvas.drawCircle(btn.cx, btn.cy, btn.radius, paintBtn);
-                    else canvas.drawRoundRect(new RectF(btn.cx - btn.radius, btn.cy - btn.radius, btn.cx + btn.radius, btn.cy + btn.radius), 20, 20, paintBtn);
-                    paintBtn.setShader(null);
-                }
+                int c = btn.isPressed ? btn.pressedColor : btn.color;
+                paintBtn.setColor(c); paintBtn.setAlpha(currentAlpha);
+                RadialGradient gradient = new RadialGradient(btn.cx - btn.radius * 0.3f, btn.cy - btn.radius * 0.3f, btn.radius * 1.2f, c, Color.BLACK, Shader.TileMode.CLAMP);
+                paintBtn.setShader(gradient);
+                if (btn.shape == 0) canvas.drawCircle(btn.cx, btn.cy, btn.radius, paintBtn);
+                else canvas.drawRoundRect(new RectF(btn.cx - btn.radius, btn.cy - btn.radius, btn.cx + btn.radius, btn.cy + btn.radius), 20, 20, paintBtn);
+                paintBtn.setShader(null);
 
-                paintText.setColor(btn.textColor);
-                paintText.setAlpha(currentAlpha);
-                paintText.setTextSize(btn.radius * 0.6f);
+                paintText.setColor(btn.textColor); paintText.setAlpha(currentAlpha); paintText.setTextSize(btn.radius * 0.6f);
                 float textOffset = (paintText.descent() - paintText.ascent()) / 2 - paintText.descent();
                 canvas.drawText(btn.id, btn.cx, btn.cy + textOffset, paintText);
-
                 if (isEditMode) canvas.drawCircle(btn.cx, btn.cy, btn.hitboxRadius, dashPaint);
             }
             
             if (isEditMode) {
                 paintText.setTextSize(40); paintText.setColor(Color.GREEN); paintText.setShadowLayer(5, 0, 0, Color.BLACK);
-                canvas.drawText("【编辑模式】拖拽位置，轻触按键设置。点下方按钮保存。", getWidth()/2f, 80, paintText);
-                paintText.clearShadowLayer();
-                
+                canvas.drawText("【编辑模式】", getWidth()/2f, 80, paintText); paintText.clearShadowLayer();
                 paintBtn.setColor(Color.RED); paintBtn.setAlpha(200);
                 canvas.drawRoundRect(new RectF(getWidth()/2f - 200, 120, getWidth()/2f + 200, 220), 20, 20, paintBtn);
-                paintText.setColor(Color.WHITE); paintText.setTextSize(45);
-                canvas.drawText("💾 保存并退出", getWidth()/2f, 185, paintText);
+                paintText.setColor(Color.WHITE); paintText.setTextSize(45); canvas.drawText("💾 保存并退出", getWidth()/2f, 185, paintText);
             }
         }
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
-            int action = event.getActionMasked();
-            int actionIndex = event.getActionIndex();
+            int action = event.getActionMasked(); int actionIndex = event.getActionIndex();
 
-            if (isEditMode) {
-                handleEditTouch(event, action, actionIndex);
-                return true;
-            }
+            if (isEditMode) { handleEditTouch(event, action, actionIndex); return true; }
 
             if (action == MotionEvent.ACTION_DOWN && menuRect.contains(event.getX(actionIndex), event.getY(actionIndex))) {
                 isDraggingMenu = true; isMenuDown = true; downX = event.getX(); downY = event.getY(); return true;
@@ -563,7 +505,7 @@ public class MainActivity extends Activity {
                 isDraggingMenu = false; return true;
             }
 
-            if (isPureTouchMode) return false; // 触屏模式拦截终止，放行所有原生手势给游戏
+            if (isPureTouchMode) return false;
 
             if (isMouseMode) {
                 boolean joyTouched = false;
@@ -578,15 +520,11 @@ public class MainActivity extends Activity {
                             if (Math.hypot(px - joyBaseX, py - joyBaseY) < joyRadius * 1.5f) joyPointerId = event.getPointerId(i);
                         }
                         if (event.getPointerId(i) == joyPointerId) {
-                            joyTouched = true;
-                            float dx = px - joyBaseX, dy = py - joyBaseY;
-                            float dist = (float) Math.hypot(dx, dy);
+                            joyTouched = true; float dx = px - joyBaseX, dy = py - joyBaseY; float dist = (float) Math.hypot(dx, dy);
                             if (dist > joyRadius) { joyKnobX = joyBaseX + (dx/dist)*joyRadius; joyKnobY = joyBaseY + (dy/dist)*joyRadius; }
                             else { joyKnobX = px; joyKnobY = py; }
-                            mouseX += (dx / joyRadius) * 20f; 
-                            mouseY += (dy / joyRadius) * 20f;
-                            mouseX = Math.max(0, Math.min(mouseX, getWidth()));
-                            mouseY = Math.max(0, Math.min(mouseY, getHeight()));
+                            mouseX += (dx / joyRadius) * 20f; mouseY += (dy / joyRadius) * 20f;
+                            mouseX = Math.max(0, Math.min(mouseX, getWidth())); mouseY = Math.max(0, Math.min(mouseY, getHeight()));
                         }
                     }
                 }
@@ -602,138 +540,92 @@ public class MainActivity extends Activity {
                 }
 
                 if (!btn.isPressed && isTouchedNow) {
-                    btn.isPressed = true;
-                    if (vibrator != null) vibrator.vibrate(20);
-                    
-                    if (btn.id.equals("L-Click")) injectNativeTouch(true);
-                    else if (btn.id.equals("R-Click")) injectNativeTouch(true); // H5一般不认右键，统一派发点击
-                    else if (btn.isTurbo) btn.startTurbo(this);
-                    else injectNativeKey(btn.keyMapStr, true);
-                    
+                    btn.isPressed = true; if (vibrator != null) vibrator.vibrate(20);
+                    if (btn.id.equals("L-Click") || btn.id.equals("R-Click")) injectNativeTouch(true);
+                    else if (btn.isTurbo) btn.startTurbo(this); else injectNativeKey(btn.keyMapStr, true);
                 } else if (btn.isPressed && !isTouchedNow) {
                     btn.isPressed = false;
-                    if (btn.id.equals("L-Click")) injectNativeTouch(false);
-                    else if (btn.id.equals("R-Click")) injectNativeTouch(false);
-                    else {
-                        if (btn.isTurbo) btn.stopTurbo();
-                        else injectNativeKey(btn.keyMapStr, false);
-                    }
+                    if (btn.id.equals("L-Click") || btn.id.equals("R-Click")) injectNativeTouch(false);
+                    else { if (btn.isTurbo) btn.stopTurbo(); else injectNativeKey(btn.keyMapStr, false); }
                 }
             }
-            invalidate();
-            return true;
+            invalidate(); return true;
         }
 
         private void handleEditTouch(MotionEvent event, int action, int actionIndex) {
             float x = event.getX(actionIndex), y = event.getY(actionIndex);
             if (action == MotionEvent.ACTION_DOWN) {
                 if (x > getWidth()/2f - 200 && x < getWidth()/2f + 200 && y > 120 && y < 220) {
-                    isEditMode = false; saveConfig();
+                    isEditMode = false; activity.prefs.edit().putString("layout", serializeConfig()).apply();
                     Toast.makeText(getContext(), "布局已保存！", Toast.LENGTH_SHORT).show();
                     activity.setupImmersive(); invalidate(); return;
                 }
                 downX = x; downY = y;
-                if (isMouseMode && Math.hypot(x - joyBaseX, y - joyBaseY) < joyRadius * 1.5f) {
-                    isDraggingJoy = true; return;
-                }
+                if (isMouseMode && Math.hypot(x - joyBaseX, y - joyBaseY) < joyRadius * 1.5f) { isDraggingJoy = true; return; }
                 for (int i = buttons.size() - 1; i >= 0; i--) {
-                    if (Math.hypot(x - buttons.get(i).cx, y - buttons.get(i).cy) < buttons.get(i).radius * 1.5f) {
-                        draggedButton = buttons.get(i); break;
-                    }
+                    if (Math.hypot(x - buttons.get(i).cx, y - buttons.get(i).cy) < buttons.get(i).radius * 1.5f) { draggedButton = buttons.get(i); break; }
                 }
             } else if (action == MotionEvent.ACTION_MOVE) {
-                if (isDraggingJoy) {
-                    joyBaseX = x; joyBaseY = y; joyKnobX = x; joyKnobY = y; invalidate();
-                } else if (draggedButton != null) {
-                    draggedButton.cx = x; draggedButton.cy = y; invalidate();
-                }
+                if (isDraggingJoy) { joyBaseX = x; joyBaseY = y; joyKnobX = x; joyKnobY = y; invalidate(); } 
+                else if (draggedButton != null) { draggedButton.cx = x; draggedButton.cy = y; invalidate(); }
             } else if (action == MotionEvent.ACTION_UP) {
-                if (isDraggingJoy) {
-                    isDraggingJoy = false; saveConfig();
-                } else if (draggedButton != null && Math.hypot(x - downX, y - downY) < 10) {
-                    showButtonSettingsDialog(draggedButton);
-                }
+                if (isDraggingJoy) { isDraggingJoy = false; activity.prefs.edit().putString("layout", serializeConfig()).apply(); } 
+                else if (draggedButton != null && Math.hypot(x - downX, y - downY) < 10) { showButtonSettingsDialog(draggedButton); }
                 draggedButton = null;
             }
         }
 
+        // ================= 智能核心独立设置菜单 =================
         private void showFloatingToolMenu() {
             Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
             ScrollView scroll = new ScrollView(getContext());
-            LinearLayout layout = new LinearLayout(getContext());
-            layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setPadding(60, 60, 60, 60);
+            LinearLayout layout = new LinearLayout(getContext()); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(60, 60, 60, 60);
             
-            TextView title = new TextView(getContext());
-            title.setText("⚙️ 全局设置菜单"); title.setTextColor(Color.WHITE); title.setTextSize(22f); title.setPadding(0, 0, 0, 30);
-            layout.addView(title);
-            
+            TextView title = new TextView(getContext()); title.setText("⚙️ 全局设置菜单"); title.setTextColor(Color.WHITE); title.setTextSize(22f); title.setPadding(0, 0, 0, 30); layout.addView(title);
             layout.addView(createMenuButton("🛠️ 编辑虚拟按键布局", v -> { isEditMode = true; dialog.dismiss(); invalidate(); }));
-            layout.addView(createMenuButton("➕ 新增自定义按键", v -> { 
-                buttons.add(new VirtualButton("新键", getWidth()/2f, getHeight()/2f, 80, "Space"));
-                isEditMode = true; dialog.dismiss(); invalidate(); 
-            }));
-            layout.addView(createMenuButton(isMouseMode ? "🖱️ 关闭鼠标模式" : "🖱️ 开启鼠标指针模式", v -> { isMouseMode = !isMouseMode; saveConfig(); dialog.dismiss(); invalidate(); }));
-            
-            layout.addView(createMenuButton(isPureTouchMode ? "🎮 退出触屏模式 (恢复手柄)" : "👆 开启纯触屏模式 (隐去按键)", v -> { 
-                isPureTouchMode = !isPureTouchMode; dialog.dismiss(); invalidate(); 
-                Toast.makeText(getContext(), isPureTouchMode ? "已开启纯触屏模式" : "已恢复虚拟按键", Toast.LENGTH_SHORT).show();
-            }));
+            layout.addView(createMenuButton("➕ 新增自定义按键", v -> { buttons.add(new VirtualButton("新键", getWidth()/2f, getHeight()/2f, 80, "Space")); isEditMode = true; dialog.dismiss(); invalidate(); }));
+            layout.addView(createMenuButton(isMouseMode ? "🖱️ 关闭鼠标摇杆" : "🖱️ 开启鼠标摇杆", v -> { isMouseMode = !isMouseMode; activity.prefs.edit().putBoolean("mouseMode", isMouseMode).apply(); dialog.dismiss(); invalidate(); }));
+            layout.addView(createMenuButton(isPureTouchMode ? "🎮 退出触屏模式" : "👆 开启纯触屏模式 (隐去按键)", v -> { isPureTouchMode = !isPureTouchMode; dialog.dismiss(); invalidate(); }));
 
-            String[] uas = {"手机模式", "电脑模式 (PC版网页)", "平板模式 (大屏网页)"};
-            layout.addView(createMenuButton("💻 切换浏览器标识 (当前: " + uas[activity.uaMode] + ")", v -> {
-                activity.uaMode = (activity.uaMode + 1) % 3;
-                activity.prefs.edit().putInt("uaMode", activity.uaMode).apply();
-                activity.applyUASettings(); activity.webView.reload(); dialog.dismiss();
-                Toast.makeText(getContext(), "已切换 UA，网页正在重新加载", Toast.LENGTH_SHORT).show();
-            }));
+            // 根据当前运行的引擎，动态显示不同的专属设置区！
+            if (activity.currentEngineMode == 1) {
+                // Web 模式专属
+                String[] uas = {"手机模式", "电脑模式 (PC版网页)", "平板模式 (大屏网页)"};
+                layout.addView(createMenuButton("💻 【Web设置】切换标识: " + uas[activity.webUAMode], v -> {
+                    activity.webUAMode = (activity.webUAMode + 1) % 3;
+                    activity.prefs.edit().putInt("webUAMode", activity.webUAMode).apply();
+                    activity.applyWebUASettings(); activity.webView.reload(); dialog.dismiss();
+                    Toast.makeText(getContext(), "已切换 UA", Toast.LENGTH_SHORT).show();
+                }));
+            } else if (activity.currentEngineMode == 2) {
+                // Flash 模式专属
+                String[] flashCores = {"Ruffle (WebAssembly高速)", "LightSpark (备用兼容)"};
+                layout.addView(createMenuButton("⚡ 【Flash设置】当前核心: " + flashCores[activity.flashCoreMode], v -> {
+                    activity.flashCoreMode = (activity.flashCoreMode + 1) % 2;
+                    activity.prefs.edit().putInt("flashCoreMode", activity.flashCoreMode).apply(); dialog.dismiss();
+                    Toast.makeText(getContext(), "核心已切换，下次载入 Flash 生效", Toast.LENGTH_SHORT).show();
+                }));
+            } else if (activity.currentEngineMode == 3) {
+                // Java 模式专属
+                String[] javaCores = {"KEmulator (基础2D)", "CheerpJ (完整JVM)"};
+                layout.addView(createMenuButton("☕ 【Java设置】当前引擎: " + javaCores[activity.javaCoreMode], v -> {
+                    activity.javaCoreMode = (activity.javaCoreMode + 1) % 2;
+                    activity.prefs.edit().putInt("javaCoreMode", activity.javaCoreMode).apply(); dialog.dismiss();
+                    Toast.makeText(getContext(), "引擎已切换，下次载入 JAR 生效", Toast.LENGTH_SHORT).show();
+                }));
+            }
 
-            String[] oris = {"横屏", "竖屏", "自动识别"};
-            layout.addView(createMenuButton("📱 切换屏幕方向 (当前: " + oris[activity.screenOrientationMode] + ")", v -> {
+            layout.addView(createMenuButton("📱 切换横竖屏", v -> {
                 activity.screenOrientationMode = (activity.screenOrientationMode + 1) % 3;
                 activity.prefs.edit().putInt("screenOrientation", activity.screenOrientationMode).apply();
                 activity.applyScreenOrientation(); dialog.dismiss();
-                Toast.makeText(getContext(), "方向已切换", Toast.LENGTH_SHORT).show();
             }));
 
-            layout.addView(createMenuButton("🌗 切换网页白天/黑夜滤镜", v -> { activity.toggleWebTheme(); dialog.dismiss(); }));
-            layout.addView(createMenuButton("🌐 重新输入网址", v -> { dialog.dismiss(); activity.showUrlInputDialog(targetEngine.getUrl()); }));
-            layout.addView(createMenuButton("🎨 UI 颜色与背景自定义", v -> { dialog.dismiss(); showInputBoxSettings(); }));
             layout.addView(createMenuButton("🏠 返回主菜单 (核心选择)", v -> { dialog.dismiss(); activity.showStartupSelector(); }));
 
             scroll.addView(layout); dialog.setContentView(scroll);
-            android.view.Window window = dialog.getWindow();
-            if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
+            android.view.Window window = dialog.getWindow(); if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
             dialog.show();
-        }
-
-        private void showInputBoxSettings() {
-            Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
-            ScrollView scroll = new ScrollView(getContext());
-            LinearLayout layout = new LinearLayout(getContext());
-            layout.setOrientation(LinearLayout.VERTICAL);
-            layout.setPadding(60, 60, 60, 60);
-            
-            TextView tv1 = new TextView(getContext()); tv1.setText("输入框背景色"); tv1.setTextColor(Color.WHITE); layout.addView(tv1);
-            EditText bgEt = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & activity.inputBgColor)), ""); layout.addView(bgEt);
-            layout.addView(activity.createColorPalette(bgEt));
-
-            TextView tv2 = new TextView(getContext()); tv2.setText("输入框字体色"); tv2.setTextColor(Color.WHITE); tv2.setPadding(0, 40, 0, 0); layout.addView(tv2);
-            EditText txtEt = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & activity.inputTextColor)), ""); layout.addView(txtEt);
-            layout.addView(activity.createColorPalette(txtEt));
-
-            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存颜色并应用"); saveBtn.setBackgroundColor(Color.parseColor("#4CAF50")); saveBtn.setTextColor(Color.WHITE);
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120); bp.setMargins(0, 50, 0, 0); saveBtn.setLayoutParams(bp);
-            saveBtn.setOnClickListener(v -> {
-                try {
-                    activity.inputBgColor = Color.parseColor(bgEt.getText().toString());
-                    activity.inputTextColor = Color.parseColor(txtEt.getText().toString());
-                    activity.prefs.edit().putInt("inputBgColor", activity.inputBgColor).putInt("inputTextColor", activity.inputTextColor).apply();
-                    Toast.makeText(getContext(), "已保存全局生效", Toast.LENGTH_SHORT).show(); dialog.dismiss();
-                } catch (Exception e) { Toast.makeText(getContext(), "颜色代码有误", Toast.LENGTH_SHORT).show(); }
-            });
-            layout.addView(saveBtn);
-            scroll.addView(layout); dialog.setContentView(scroll); dialog.show();
         }
 
         private Button createMenuButton(String text, OnClickListener listener) {
@@ -744,76 +636,39 @@ public class MainActivity extends Activity {
 
         private void showButtonSettingsDialog(VirtualButton btn) {
             Dialog dialog = new Dialog(getContext(), android.R.style.Theme_DeviceDefault_Dialog);
-            ScrollView scroll = new ScrollView(getContext()); LinearLayout layout = new LinearLayout(getContext()); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(60, 40, 60, 60);
+            LinearLayout layout = new LinearLayout(getContext()); layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(60, 40, 60, 60);
 
-            TextView title = new TextView(getContext()); title.setText("配置按键: " + btn.id); title.setTextColor(Color.WHITE); title.setTextSize(22); layout.addView(title);
+            EditText nameInput = new EditText(getContext()); nameInput.setText(btn.id); nameInput.setTextColor(Color.WHITE); layout.addView(nameInput);
+            EditText keyInput = new EditText(getContext()); keyInput.setText(btn.keyMapStr); keyInput.setTextColor(Color.WHITE); layout.addView(keyInput);
             
-            final EditText nameInput = createBlackTextEdit(btn.id, "按键名称 (L-Click为鼠标专有)"); layout.addView(nameInput);
-            final EditText keyInput = createBlackTextEdit(btn.keyMapStr, "映射键值 (如 A 或 DOWN)"); layout.addView(keyInput);
-            
-            final EditText colorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.color)), "常态颜色代码"); layout.addView(colorInput);
-            layout.addView(activity.createColorPalette(colorInput));
-            
-            final EditText pressedColorInput = createBlackTextEdit(String.format("#%06X", (0xFFFFFF & btn.pressedColor)), "按下颜色代码"); layout.addView(pressedColorInput);
-            layout.addView(activity.createColorPalette(pressedColorInput));
-
-            final EditText alphaInput = createBlackTextEdit(String.valueOf(btn.alpha), "透明度 0-255"); layout.addView(alphaInput);
-            final EditText radiusInput = createBlackTextEdit(String.valueOf((int)btn.radius), "按键大小"); layout.addView(radiusInput);
-
-            final boolean[] isSaved = {false};
-            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存修改"); saveBtn.setBackgroundColor(Color.parseColor("#1976D2")); saveBtn.setTextColor(Color.WHITE);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 120); lp.setMargins(0, 20, 0, 10); saveBtn.setLayoutParams(lp);
+            Button saveBtn = new Button(getContext()); saveBtn.setText("💾 保存修改"); saveBtn.setBackgroundColor(Color.parseColor("#1976D2"));
             saveBtn.setOnClickListener(v -> {
-                try {
-                    btn.id = nameInput.getText().toString(); btn.keyMapStr = keyInput.getText().toString();
-                    btn.color = Color.parseColor(colorInput.getText().toString()); btn.pressedColor = Color.parseColor(pressedColorInput.getText().toString());
-                    btn.alpha = Integer.parseInt(alphaInput.getText().toString()); btn.radius = Integer.parseInt(radiusInput.getText().toString());
-                    btn.hitboxRadius = btn.radius * 1.5f; isSaved[0] = true; saveConfig(); invalidate(); dialog.dismiss();
-                } catch(Exception e) { Toast.makeText(getContext(), "格式错误", Toast.LENGTH_SHORT).show(); }
-            });
-            layout.addView(saveBtn);
-
-            Button delBtn = new Button(getContext()); delBtn.setText("🗑️ 删除此按键"); delBtn.setBackgroundColor(Color.parseColor("#F44336")); delBtn.setTextColor(Color.WHITE);
-            delBtn.setLayoutParams(lp); delBtn.setOnClickListener(v -> { isSaved[0] = true; buttons.remove(btn); saveConfig(); invalidate(); dialog.dismiss(); });
-            layout.addView(delBtn);
-
-            scroll.addView(layout); dialog.setContentView(scroll);
-            android.view.Window window = dialog.getWindow(); if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
+                btn.id = nameInput.getText().toString(); btn.keyMapStr = keyInput.getText().toString();
+                activity.prefs.edit().putString("layout", serializeConfig()).apply(); invalidate(); dialog.dismiss();
+            }); layout.addView(saveBtn);
             
-            dialog.setCanceledOnTouchOutside(true);
-            dialog.setOnCancelListener(d -> {
-                if (!isSaved[0]) {
-                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert).setTitle("⚠️ 未保存修改").setMessage("保存刚刚的修改吗？")
-                        .setPositiveButton("💾 保存", (dI, i) -> saveBtn.performClick()).setNeutralButton("🔙 继续", (dI, i) -> dialog.show())
-                        .setNegativeButton("❌ 放弃", (dI, i) -> dialog.dismiss()).show();
-                }
-            });
-            dialog.show();
+            Button delBtn = new Button(getContext()); delBtn.setText("🗑️ 删除此键"); delBtn.setBackgroundColor(Color.parseColor("#F44336"));
+            delBtn.setOnClickListener(v -> { buttons.remove(btn); activity.prefs.edit().putString("layout", serializeConfig()).apply(); invalidate(); dialog.dismiss(); }); layout.addView(delBtn);
+
+            dialog.setContentView(layout); dialog.show();
         }
 
-        private EditText createBlackTextEdit(String text, String hint) {
-            EditText et = new EditText(getContext()); et.setText(text); et.setHint(hint); et.setTextColor(Color.BLACK); et.setHintTextColor(Color.GRAY); et.setBackgroundColor(Color.WHITE);
-            et.setPadding(30, 20, 30, 20); LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT); lp.setMargins(0, 15, 0, 15); et.setLayoutParams(lp);
-            return et;
-        }
-
-        private void saveConfig() {
+        private String serializeConfig() {
             try {
                 JSONArray array = new JSONArray();
                 for (VirtualButton b : buttons) {
                     JSONObject obj = new JSONObject();
-                    obj.put("id", b.id); obj.put("cx", b.cx); obj.put("cy", b.cy); obj.put("radius", b.radius); obj.put("color", b.color);
-                    obj.put("pressedColor", b.pressedColor); obj.put("alpha", b.alpha); obj.put("keyMap", b.keyMapStr); obj.put("shape", b.shape);
-                    array.put(obj);
+                    obj.put("id", b.id); obj.put("cx", b.cx); obj.put("cy", b.cy); obj.put("radius", b.radius); 
+                    obj.put("keyMap", b.keyMapStr); array.put(obj);
                 }
-                prefs.edit().putString("layout", array.toString()).putBoolean("mouseMode", isMouseMode).apply();
-            } catch (Exception e) {}
+                return array.toString();
+            } catch (Exception e) { return "[]"; }
         }
 
         private void loadConfig() {
-            String json = prefs.getString("layout", null);
-            isMouseMode = prefs.getBoolean("mouseMode", false);
-            if (json == null || json.equals("[]")) {
+            String json = activity.prefs.getString("layout", "[]");
+            isMouseMode = activity.prefs.getBoolean("mouseMode", false);
+            if (json.equals("[]")) {
                 buttons.add(new VirtualButton("UP", 200, 500, 80, "UP")); buttons.add(new VirtualButton("DOWN", 200, 800, 80, "DOWN"));
                 buttons.add(new VirtualButton("LEFT", 50, 650, 80, "LEFT")); buttons.add(new VirtualButton("RIGHT", 350, 650, 80, "RIGHT"));
                 buttons.add(new VirtualButton("A", 1600, 650, 90, "a")); buttons.add(new VirtualButton("B", 1800, 500, 90, "b"));
@@ -824,8 +679,7 @@ public class MainActivity extends Activity {
                     for (int i = 0; i < array.length(); i++) {
                         JSONObject o = array.getJSONObject(i);
                         VirtualButton btn = new VirtualButton(o.optString("id"), (float)o.optDouble("cx"), (float)o.optDouble("cy"), (float)o.optDouble("radius"), o.optString("keyMap"));
-                        btn.color = o.optInt("color", Color.GRAY); btn.pressedColor = o.optInt("pressedColor", Color.WHITE);
-                        btn.alpha = o.optInt("alpha", 150); btn.shape = o.optInt("shape", 0); buttons.add(btn);
+                        buttons.add(btn);
                     }
                 } catch (Exception e) {}
             }
@@ -835,7 +689,7 @@ public class MainActivity extends Activity {
             public String id; public float cx, cy, radius, hitboxRadius;
             public String keyMapStr; public boolean isPressed = false;
             public int color = Color.GRAY, pressedColor = Color.WHITE, alpha = 150, shape = 0, textColor = Color.WHITE;
-            public Bitmap skinBitmap = null; public boolean isTurbo = false; public int turboInterval = 50;
+            public boolean isTurbo = false; public int turboInterval = 50;
             private volatile boolean turboRunning = false;
             private static final ExecutorService threadPool = Executors.newCachedThreadPool();
 
