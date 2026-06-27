@@ -15,22 +15,24 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    # 核心修复：通过 API 动态抓取含有日期的最新版 Ruffle 核心真实链接
-    - name: Fetch Local Emulation Cores
+    - name: Fetch Local Emulation Cores (Flash & Java)
       run: |
+        echo "创建离线核心目录..."
         mkdir -p app/src/main/assets/ruffle
-        echo "正在通过 GitHub API 获取最强 Flash 离线核心的最新链接..."
+        mkdir -p app/src/main/assets/java
         
-        # 自动提取最新版 web-selfhosted.zip 的真实下载地址
+        echo "1. 正在通过 GitHub API 获取最新版 Ruffle 核心..."
         DOWNLOAD_URL=$(curl -s https://api.github.com/repos/ruffle-rs/ruffle/releases | grep "browser_download_url.*web-selfhosted.zip" | head -n 1 | cut -d '"' -f 4)
-        
-        echo "抓取成功，真实链接为: $DOWNLOAD_URL"
-        echo "正在拉取核心文件..."
         wget -qO ruffle.zip "$DOWNLOAD_URL"
-        
-        echo "正在解压并安装核心..."
         unzip -q ruffle.zip -d app/src/main/assets/ruffle/
         rm ruffle.zip
+        
+        echo "2. 正在抓取本地 Java 运行核心 (CheerpJ Loader)..."
+        # 直接拉取 Java 核心加载器与必要的 Wasm 组件打包进本地
+        wget -qO app/src/main/assets/java/cj3loader.js "https://cj3.leaningtech.com/3.0/cj3loader.js"
+        # 注意: CheerpJ 内部还会动态请求 wasm, 真正的无网纯离线需要抓取整套运行时。
+        # 如果你有自己打包好的完整 Java 离线 zip，可以把上面那行替换成类似这样：
+        # wget -qO java_engine.zip "你的私有链接" && unzip java_engine.zip -d app/src/main/assets/java/
 
     - name: Auto-Scaffold Android Environment
       run: |
