@@ -59,6 +59,9 @@ public class MainActivity extends Activity {
     private GamepadView gamepadView;
     private long backPressedTime = 0;
     public SharedPreferences prefs;
+    
+    // 补回丢失的白天/黑夜模式开关变量
+    public boolean isDarkMode = false;
 
     // 当前运行的引擎模式: 0=空闲, 1=Web网页, 2=本地Flash, 3=本地Java
     public int currentEngineMode = 0;
