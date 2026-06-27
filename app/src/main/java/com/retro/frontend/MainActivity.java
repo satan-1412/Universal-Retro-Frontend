@@ -376,7 +376,8 @@ public class MainActivity extends Activity {
                     view.evaluateJavascript(js, null);
                 }
             }
-
+        });
+    }
 
     // ================= 极低延迟虚拟按键引擎 =================
     public static class GamepadView extends View {
