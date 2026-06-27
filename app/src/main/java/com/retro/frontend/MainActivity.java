@@ -166,12 +166,13 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode == RESULT_OK && data != null && data.getData() != null) {
             pendingLocalGameUri = data.getData();
+            String fakeDomain = prefs.getString("fakeDomain", "https://www.4399.com");
             if (requestCode == 101) { 
                 currentEngineMode = 2;
-                startGameContainer("https://app.local/flash_player.html"); 
+                startGameContainer(fakeDomain + "/flash_player.html"); 
             } else if (requestCode == 102) { 
                 currentEngineMode = 3;
-                startGameContainer("https://app.local/java_player.html"); 
+                startGameContainer(fakeDomain + "/java_player.html"); 
             }
         }
     }
@@ -245,86 +246,92 @@ public class MainActivity extends Activity {
         webView.setBackgroundColor(Color.BLACK);
         
         webView.setWebViewClient(new WebViewClient() {
-            @Override
+                        @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
+                String fakeDomain = prefs.getString("fakeDomain", "https://www.4399.com");
                 
-                // 【核心修复1】撕裂 CORS 防线：生成带有万能跨域头的 Response
                 java.util.Map<String, String> corsHeaders = new java.util.HashMap<>();
                 corsHeaders.put("Access-Control-Allow-Origin", "*");
                 corsHeaders.put("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
                 corsHeaders.put("Access-Control-Allow-Headers", "*");
                 
-                // 1. 核心路由：Flash 离线核心拦截 (附带 CORS 头防止被 4399 等 iframe 阻止)
-                if (url.startsWith("https://app.local/ruffle/")) {
-                    String assetPath = url.replace("https://app.local/", "");
+                // 1. 在线网页强制提取本地 Ruffle 核心（突破严格 CSP 跨域封锁）
+                // 无论当前在什么网站，只要它请求 /ikemen_local_ruffle/ ，就返回我们打进包里的离线核心
+                if (url.contains("/ikemen_local_ruffle/")) {
+                    String assetPath = url.substring(url.indexOf("/ikemen_local_ruffle/") + 21);
                     try {
-                        InputStream is = getAssets().open(assetPath);
+                        InputStream is = getAssets().open("ruffle/" + assetPath);
                         String mime = "application/javascript";
                         if (assetPath.endsWith(".wasm")) mime = "application/wasm"; 
                         else if (assetPath.endsWith(".json")) mime = "application/json";
                         
                         if (android.os.Build.VERSION.SDK_INT >= 21) {
                             return new WebResourceResponse(mime, "UTF-8", 200, "OK", corsHeaders, is);
-                        } else {
-                            return new WebResourceResponse(mime, "UTF-8", is);
-                        }
+                        } else { return new WebResourceResponse(mime, "UTF-8", is); }
                     } catch (Exception e) { e.printStackTrace(); }
                 }
 
-                // 2. 本地流媒体拦截：【核心修复2】提供精确的 Content-Length，解决本地游戏永远卡在加载界面 0% 的问题
-                if (url.equals("https://app.local/stream_game_data") && pendingLocalGameUri != null) {
+                // 2. 本地流媒体数据伪装 (精确长度防卡死，并在 fakeDomain 下吐出数据)
+                if (url.equals(fakeDomain + "/stream_game_data") && pendingLocalGameUri != null) {
                     try {
                         InputStream is = getContentResolver().openInputStream(pendingLocalGameUri);
-                        // 获取文件的精确字节数，告诉 Flash 游戏的加载条总量是多少
                         corsHeaders.put("Content-Length", String.valueOf(is.available()));
-                        
+                        corsHeaders.put("Accept-Ranges", "bytes");
                         if (android.os.Build.VERSION.SDK_INT >= 21) {
                             return new WebResourceResponse("application/octet-stream", "UTF-8", 200, "OK", corsHeaders, is);
-                        } else {
-                            return new WebResourceResponse("application/octet-stream", "UTF-8", is);
-                        }
+                        } else { return new WebResourceResponse("application/octet-stream", "UTF-8", is); }
                     } catch (Exception e) { e.printStackTrace(); }
                 }
                 
-                // 3. 自动生成本地 Flash 容器页面
-                if (url.equals("https://app.local/flash_player.html")) {
+                // 3. 本地 Flash 容器页面：容器本身的 URL 就是伪装域名，完美骗过游戏防盗链！
+                if (url.equals(fakeDomain + "/flash_player.html")) {
+                    // Flash 核心设置实装
+                    String renderer = flashCoreMode == 0 ? "webgl" : "canvas";
                     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
                             "<style>body,html{margin:0;padding:0;width:100%;height:100%;background:black;overflow:hidden;}</style>" +
-                            "<script src='https://app.local/ruffle/ruffle.js'></script></head><body>" + 
+                            "<script src='" + fakeDomain + "/ikemen_local_ruffle/ruffle.js'></script></head><body>" + 
                             "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
                             "<script>" +
                             "window.RufflePlayer = window.RufflePlayer || {};" +
+                            "window.RufflePlayer.config = { 'preferredRenderer': '" + renderer + "', 'autoplay': 'on', 'unmuteOverlay': 'hidden' };" +
                             "window.addEventListener('load', () => {" +
                             "  const ruffle = window.RufflePlayer.newest();" +
                             "  const player = ruffle.createPlayer();" +
                             "  document.getElementById('ruffle-container').appendChild(player);" +
                             "  player.style.width = '100%'; player.style.height = '100%';" +
-                            "  player.load('https://app.local/stream_game_data');" +
+                            "  player.load('" + fakeDomain + "/stream_game_data');" +
                             "});" +
                             "</script></body></html>";
                     return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
                 }
 
-                // 4. 自动生成本地 Java (J2ME) 容器页面 【核心修复3】正式接入 CheerpJ 3 (真·Java字节码编译器)
-                if (url.equals("https://app.local/java_player.html")) {
+                // 4. Java 容器页面 (加入网络失败提示与完美异步等待机制)
+                if (url.equals(fakeDomain + "/java_player.html")) {
+                    // Java 核心设置实装
+                    String memoryLimit = javaCoreMode == 0 ? "128" : "512"; 
                     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
-                            "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;}</style>" +
-                            "<script src='https://cj3.leaningtech.com/3.0/cj3loader.js'></script></head><body>" +
-                            "<h2 id='jtext'>☕ 正在启动 Java 虚拟机引擎...</h2>" +
+                            "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;font-family:sans-serif;}</style>" +
+                            "</head><body>" +
+                            "<h2 id='jtext'>☕ 正在获取 Java 引擎... (请确保网络畅通)</h2>" +
                             "<script>" +
-                            "async function runJava() {" +
+                            "var script = document.createElement('script');" +
+                            "script.src = 'https://cj3.leaningtech.com/3.0/cj3loader.js';" +
+                            "script.onerror = function() { document.getElementById('jtext').innerText = '❌ 引擎下载失败，可能是网络问题或防火墙拦截'; };" +
+                            "script.onload = async function() {" +
                             "  try {" +
-                            "    await cheerpjInit();" +
+                            "    document.getElementById('jtext').innerText = '☕ 正在初始化虚拟机 (内存: " + memoryLimit + "MB)...';" +
+                            "    await cheerpjInit({ enableGles3: true });" + // 等待引擎就绪再往下走，彻底消灭未定义报错
                             "    document.getElementById('jtext').innerText = '☕ 正在载入 JAR 字节流...';" +
-                            "    const response = await fetch('https://app.local/stream_game_data');" +
+                            "    const response = await fetch('" + fakeDomain + "/stream_game_data');" +
+                            "    if(!response.ok) throw new Error('文件加载失败');" +
                             "    const arrayBuffer = await response.arrayBuffer();" +
                             "    cheerpjAddStringFile('/str/game.jar', new Uint8Array(arrayBuffer));" +
                             "    document.getElementById('jtext').style.display = 'none';" +
                             "    await cheerpjRunJar('/str/game.jar');" +
-                            "  } catch (e) { document.getElementById('jtext').innerText = '启动失败: ' + e; }" +
-                            "}" +
-                            "runJava();" +
+                            "  } catch (e) { document.getElementById('jtext').innerText = '启动崩溃: ' + e; }" +
+                            "};" +
+                            "document.head.appendChild(script);" +
                             "</script></body></html>";
                     return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
                 }
@@ -332,23 +339,36 @@ public class MainActivity extends Activity {
                 return super.shouldInterceptRequest(view, request);
             }
 
-            // 网页 Flash 注入器 (调用离线核心)
             @Override
-            public void onPageFinished(WebView view, String url) {
-                super.onPageFinished(view, url);
-                if (currentEngineMode == 1) { 
+            public void onPageStarted(WebView view, String url, Bitmap favicon) {
+                super.onPageStarted(view, url, favicon);
+                if (currentEngineMode == 1) {
+                    // 【降维打击】利用当前网页的域名伪造一个本地文件路径，彻底绕过在线网页对外部域名的安全封锁！
+                    String origin = Uri.parse(url).getScheme() + "://" + Uri.parse(url).getHost();
                     String js = "javascript:(function() {" +
                         "if(window.injected)return; window.injected=true;" +
                         "window.RufflePlayer = window.RufflePlayer || {};" +
                         "window.RufflePlayer.config = { " +
-                        "  'publicPath': 'https://app.local/ruffle/', " + // 【关键点】：强制指定公用路径为拦截器路径
-                        "  'autoplay': 'on', " +
-                        "  'unmuteOverlay': 'hidden', " +
-                        "  'allowScriptAccess': true " +
+                        "  'publicPath': '" + origin + "/ikemen_local_ruffle/', " +
+                        "  'autoplay': 'on', 'unmuteOverlay': 'hidden', 'allowScriptAccess': true " +
                         "};" +
                         "var script = document.createElement('script');" +
-                        "script.src = 'https://app.local/ruffle/ruffle.js';" + 
+                        "script.src = '" + origin + "/ikemen_local_ruffle/ruffle.js';" + 
                         "document.head.appendChild(script);" +
+                        "})()";
+                    view.evaluateJavascript(js, null);
+                }
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                if (currentEngineMode == 1) { 
+                    // 应对 iframe 嵌套的兜底注入，依然用假冒的同源域名
+                    String origin = Uri.parse(url).getScheme() + "://" + Uri.parse(url).getHost();
+                    String js = "javascript:(function() {" +
+                        "var script = document.createElement('script');" +
+                        "script.src = '" + origin + "/ikemen_local_ruffle/ruffle.js';" + 
                         "var frames = document.getElementsByTagName('iframe');" +
                         "for(var i=0; i<frames.length; i++) {" +
                         "   try { frames[i].contentWindow.document.head.appendChild(script.cloneNode(true)); } catch(e){}" +
@@ -356,48 +376,7 @@ public class MainActivity extends Activity {
                     view.evaluateJavascript(js, null);
                 }
             }
-        });
-        
-        webView.setWebChromeClient(new WebChromeClient());
-    }
 
-
-    private void startGameContainer(String url) {
-        rootLayout.removeAllViews();
-        // 如果是 Web 模式才应用 UA
-        if (currentEngineMode == 1) applyWebUASettings(); 
-        
-        webView.loadUrl(url);
-        rootLayout.addView(webView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        
-        if (gamepadView == null) gamepadView = new GamepadView(this, webView);
-        gamepadView.isPureTouchMode = false; // 启动时重置为手柄模式
-        rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        setupImmersive();
-    }
-
-    public void applyWebUASettings() {
-        WebSettings settings = webView.getSettings();
-        if (webUAMode == 1) settings.setUserAgentString(UA_PC);
-        else if (webUAMode == 2) settings.setUserAgentString(UA_TABLET);
-        else settings.setUserAgentString(UA_MOBILE);
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (gamepadView != null && gamepadView.isEditMode) {
-            Toast.makeText(this, "请先保存按键配置", Toast.LENGTH_SHORT).show(); return;
-        }
-        long now = System.currentTimeMillis();
-        if (now - backPressedTime < 2000) { super.onBackPressed(); } 
-        else { Toast.makeText(this, "再按一次退出 App", Toast.LENGTH_SHORT).show(); backPressedTime = now; }
-    }
-
-    public void toggleWebTheme() {
-        isDarkMode = !isDarkMode;
-        String js = isDarkMode ? "document.body.style.filter = 'invert(1) hue-rotate(180deg)';" : "document.body.style.filter = 'none';";
-        webView.evaluateJavascript(js, null);
-    }
 
     // ================= 极低延迟虚拟按键引擎 =================
     public static class GamepadView extends View {
@@ -654,19 +633,47 @@ public class MainActivity extends Activity {
                 }));
             }
 
-            layout.addView(createMenuButton("📱 切换横竖屏", v -> {
+                        layout.addView(createMenuButton("📱 切换横竖屏", v -> {
                 activity.screenOrientationMode = (activity.screenOrientationMode + 1) % 3;
                 activity.prefs.edit().putInt("screenOrientation", activity.screenOrientationMode).apply();
                 activity.applyScreenOrientation(); dialog.dismiss();
             }));
 
-            // 补回丢失的重新输入网址功能
-            layout.addView(createMenuButton("🌐 重新输入网址", v -> { 
-                dialog.dismiss(); 
-                activity.showUrlInputDialog(targetEngine.getUrl()); 
-            }));
+            // 智能菜单：根据模式动态显示功能
+            if (activity.currentEngineMode == 1) {
+                // 仅在线模式显示重新输入网址
+                layout.addView(createMenuButton("🌐 重新输入网址", v -> { 
+                    dialog.dismiss(); activity.showUrlInputDialog(targetEngine.getUrl()); 
+                }));
+            } else {
+                // 仅本地模式显示重新加载
+                layout.addView(createMenuButton("🔄 重新加载游戏 (应用核心/域名更改)", v -> { 
+                    dialog.dismiss(); activity.webView.reload(); 
+                }));
+                
+                // 允许随时更改防盗链域名，通杀所有站点的本地验证
+                layout.addView(createMenuButton("🛡️ 防盗链伪装域名 (当前: " + activity.prefs.getString("fakeDomain", "https://www.4399.com") + ")", v -> {
+                    dialog.dismiss();
+                    final EditText domainInput = new EditText(getContext());
+                    domainInput.setText(activity.prefs.getString("fakeDomain", "https://www.4399.com"));
+                    domainInput.setTextColor(Color.BLACK); domainInput.setBackgroundColor(Color.WHITE);
+                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("伪装域名 (破解网站本地防盗链)")
+                        .setView(domainInput)
+                        .setPositiveButton("💾 保存并重载", (d, w) -> {
+                            String fd = domainInput.getText().toString();
+                            if (!fd.startsWith("http")) fd = "https://" + fd;
+                            activity.prefs.edit().putString("fakeDomain", fd).apply();
+                            // 瞬间切换到新域名并重启游戏
+                            if (activity.currentEngineMode == 2) activity.startGameContainer(fd + "/flash_player.html");
+                            else if (activity.currentEngineMode == 3) activity.startGameContainer(fd + "/java_player.html");
+                            Toast.makeText(getContext(), "伪装域名已更新，游戏正在重载", Toast.LENGTH_SHORT).show();
+                        }).show();
+                }));
+            }
 
             layout.addView(createMenuButton("🏠 返回主菜单 (核心选择)", v -> { dialog.dismiss(); activity.showStartupSelector(); }));
+
 
             scroll.addView(layout); dialog.setContentView(scroll);
             android.view.Window window = dialog.getWindow(); if (window != null) window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, (int)(getHeight() * 0.85));
