@@ -1,6 +1,6 @@
 name: Manual Build RetroWeb Pro
 on:
-  workflow_dispatch: # 核心修改：只允许手动触发构建，防封号防滥用
+  workflow_dispatch: # 纯手动触发，防风控
 
 jobs:
   build:
@@ -15,15 +15,22 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    # 核心二步：在云端自动下载最新的 Ruffle 离线核心到 App 的内置资源中
+    # 核心修复：通过 API 动态抓取含有日期的最新版 Ruffle 核心真实链接
     - name: Fetch Local Emulation Cores
       run: |
         mkdir -p app/src/main/assets/ruffle
-        echo "正在拉取最强 Flash WebAssembly 离线核心..."
-        wget -qO ruffle.zip https://github.com/ruffle-rs/ruffle/releases/latest/download/ruffle-web-selfhosted.zip
+        echo "正在通过 GitHub API 获取最强 Flash 离线核心的最新链接..."
+        
+        # 自动提取最新版 web-selfhosted.zip 的真实下载地址
+        DOWNLOAD_URL=$(curl -s https://api.github.com/repos/ruffle-rs/ruffle/releases | grep "browser_download_url.*web-selfhosted.zip" | head -n 1 | cut -d '"' -f 4)
+        
+        echo "抓取成功，真实链接为: $DOWNLOAD_URL"
+        echo "正在拉取核心文件..."
+        wget -qO ruffle.zip "$DOWNLOAD_URL"
+        
+        echo "正在解压并安装核心..."
         unzip -q ruffle.zip -d app/src/main/assets/ruffle/
         rm ruffle.zip
-        echo "Java KEmulator 等核心也可以在此处扩充..."
 
     - name: Auto-Scaffold Android Environment
       run: |
