@@ -262,6 +262,13 @@ public class MainActivity extends Activity {
         settings.setAllowUniversalAccessFromFileURLs(true);
         // 允许 WebAssembly 运行必备 (禁止媒体播放必须由用户点击触发)
         settings.setMediaPlaybackRequiresUserGesture(false); 
+        
+        // 【新增】Unity3D / WebGL 黑屏核心修复与混合内容放行
+        settings.setDatabaseEnabled(true);
+        settings.setDomStorageEnabled(true);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        }
 
         // ================= 动态性能自适应引擎 =================
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) { 
@@ -306,6 +313,21 @@ public class MainActivity extends Activity {
                     } catch (Exception e) { e.printStackTrace(); }
                 }
 
+                // 【新增】本地 Java 引擎离线拦截器
+                if (url.contains("/ikemen_local_java/")) {
+                    String assetPath = url.substring(url.indexOf("/ikemen_local_java/") + 19);
+                    try {
+                        InputStream is = getAssets().open("java/" + assetPath);
+                        String mime = "application/javascript";
+                        if (assetPath.endsWith(".wasm")) mime = "application/wasm";
+                        else if (assetPath.endsWith(".jar")) mime = "application/java-archive";
+                        
+                        if (android.os.Build.VERSION.SDK_INT >= 21) {
+                            return new WebResourceResponse(mime, "UTF-8", 200, "OK", corsHeaders, is);
+                        } else { return new WebResourceResponse(mime, "UTF-8", is); }
+                    } catch (Exception e) { e.printStackTrace(); }
+                }
+
                 // 2. 本地流媒体数据伪装 (精确长度防卡死，并在 fakeDomain 下吐出数据)
                 if (url.equals(fakeDomain + "/stream_game_data") && pendingLocalGameUri != null) {
                     try {
@@ -328,13 +350,13 @@ public class MainActivity extends Activity {
                             "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
                             "<script>" +
                             "window.RufflePlayer = window.RufflePlayer || {};" +
-                            "window.RufflePlayer.config = { 'preferredRenderer': '" + renderer + "', 'autoplay': 'on', 'unmuteOverlay': 'hidden' };" +
+                            "window.RufflePlayer.config = { 'preferredRenderer': '" + renderer + "', 'autoplay': 'on', 'unmuteOverlay': 'hidden', 'base': '" + fakeDomain + "/' };" +
                             "window.addEventListener('load', () => {" +
                             "  const ruffle = window.RufflePlayer.newest();" +
                             "  const player = ruffle.createPlayer();" +
                             "  document.getElementById('ruffle-container').appendChild(player);" +
                             "  player.style.width = '100%'; player.style.height = '100%';" +
-                            "  player.load('" + fakeDomain + "/stream_game_data');" +
+                            "  player.load({ url: '" + fakeDomain + "/stream_game_data', allowScriptAccess: true });" +
                             "});" +
                             "</script></body></html>";
                     return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
@@ -347,11 +369,11 @@ public class MainActivity extends Activity {
                     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
                             "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;font-family:sans-serif;}</style>" +
                             "</head><body>" +
-                            "<h2 id='jtext'>☕ 正在获取 Java 引擎... (请确保网络畅通)</h2>" +
+                            "<h2 id='jtext'>☕ 正在加载本地 Java 引擎...</h2>" +
                             "<script>" +
                             "var script = document.createElement('script');" +
-                            "script.src = 'https://cj3.leaningtech.com/3.0/cj3loader.js';" +
-                            "script.onerror = function() { document.getElementById('jtext').innerText = '❌ 引擎下载失败，可能是网络问题或防火墙拦截'; };" +
+                            "script.src = '" + fakeDomain + "/ikemen_local_java/cj3loader.js';" +
+                            "script.onerror = function() { document.getElementById('jtext').innerText = '❌ 引擎加载失败，请检查构建时是否成功下载核心'; };" +
                             "script.onload = async function() {" +
                             "  try {" +
                             "    document.getElementById('jtext').innerText = '☕ 正在初始化虚拟机 (内存: " + memoryLimit + "MB)...';" +
@@ -640,31 +662,43 @@ public class MainActivity extends Activity {
             layout.addView(createMenuButton(isMouseMode ? "🖱️ 关闭鼠标摇杆" : "🖱️ 开启鼠标摇杆", v -> { isMouseMode = !isMouseMode; activity.prefs.edit().putBoolean("mouseMode", isMouseMode).apply(); dialog.dismiss(); invalidate(); }));
             layout.addView(createMenuButton(isPureTouchMode ? "🎮 退出触屏模式" : "👆 开启纯触屏模式 (隐去按键)", v -> { isPureTouchMode = !isPureTouchMode; dialog.dismiss(); invalidate(); }));
 
-            // 根据当前运行的引擎，动态显示不同的专属设置区！
+            // 根据当前运行的引擎，动态显示不同的专属设置区！（已修改为弹窗）
             if (activity.currentEngineMode == 1) {
-                // Web 模式专属
                 String[] uas = {"手机模式", "电脑模式 (PC版网页)", "平板模式 (大屏网页)"};
                 layout.addView(createMenuButton("💻 【Web设置】切换标识: " + uas[activity.webUAMode], v -> {
-                    activity.webUAMode = (activity.webUAMode + 1) % 3;
-                    activity.prefs.edit().putInt("webUAMode", activity.webUAMode).apply();
-                    activity.applyWebUASettings(); activity.webView.reload(); dialog.dismiss();
-                    Toast.makeText(getContext(), "已切换 UA", Toast.LENGTH_SHORT).show();
+                    dialog.dismiss();
+                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("选择 Web 浏览器标识 (UA)")
+                        .setSingleChoiceItems(uas, activity.webUAMode, (d, which) -> {
+                            activity.webUAMode = which;
+                            activity.prefs.edit().putInt("webUAMode", which).apply();
+                            activity.applyWebUASettings(); activity.webView.reload();
+                            d.dismiss(); Toast.makeText(getContext(), "已切换 UA", Toast.LENGTH_SHORT).show();
+                        }).show();
                 }));
             } else if (activity.currentEngineMode == 2) {
-                // Flash 模式专属
-                String[] flashCores = {"Ruffle (WebAssembly高速)", "LightSpark (备用兼容)"};
+                String[] flashCores = {"Ruffle 最新版 (WebAssembly高速)", "Ruffle 兼容版 (旧引擎备用)"};
                 layout.addView(createMenuButton("⚡ 【Flash设置】当前核心: " + flashCores[activity.flashCoreMode], v -> {
-                    activity.flashCoreMode = (activity.flashCoreMode + 1) % 2;
-                    activity.prefs.edit().putInt("flashCoreMode", activity.flashCoreMode).apply(); dialog.dismiss();
-                    Toast.makeText(getContext(), "核心已切换，下次载入 Flash 生效", Toast.LENGTH_SHORT).show();
+                    dialog.dismiss();
+                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("选择 Flash 运行核心")
+                        .setSingleChoiceItems(flashCores, activity.flashCoreMode, (d, which) -> {
+                            activity.flashCoreMode = which;
+                            activity.prefs.edit().putInt("flashCoreMode", which).apply();
+                            d.dismiss(); Toast.makeText(getContext(), "核心已切换，下次载入 Flash 生效", Toast.LENGTH_SHORT).show();
+                        }).show();
                 }));
             } else if (activity.currentEngineMode == 3) {
-                // Java 模式专属
-                String[] javaCores = {"KEmulator (基础2D)", "CheerpJ (完整JVM)"};
+                String[] javaCores = {"KEmulator Web版 (基础2D)", "CheerpJ 本地版 (完整JVM)"};
                 layout.addView(createMenuButton("☕ 【Java设置】当前引擎: " + javaCores[activity.javaCoreMode], v -> {
-                    activity.javaCoreMode = (activity.javaCoreMode + 1) % 2;
-                    activity.prefs.edit().putInt("javaCoreMode", activity.javaCoreMode).apply(); dialog.dismiss();
-                    Toast.makeText(getContext(), "引擎已切换，下次载入 JAR 生效", Toast.LENGTH_SHORT).show();
+                    dialog.dismiss();
+                    new AlertDialog.Builder(getContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("选择 Java 运行引擎")
+                        .setSingleChoiceItems(javaCores, activity.javaCoreMode, (d, which) -> {
+                            activity.javaCoreMode = which;
+                            activity.prefs.edit().putInt("javaCoreMode", which).apply();
+                            d.dismiss(); Toast.makeText(getContext(), "引擎已切换，下次载入 JAR 生效", Toast.LENGTH_SHORT).show();
+                        }).show();
                 }));
             }
 
