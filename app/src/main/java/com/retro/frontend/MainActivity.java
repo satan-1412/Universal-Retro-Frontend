@@ -249,32 +249,49 @@ public class MainActivity extends Activity {
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
                 
-                // 1. 核心路由：将网页或游戏对 Flash 核心的请求，强行重定向到我们刚刚打包进 APK 的离线文件！
+                // 【核心修复1】撕裂 CORS 防线：生成带有万能跨域头的 Response
+                java.util.Map<String, String> corsHeaders = new java.util.HashMap<>();
+                corsHeaders.put("Access-Control-Allow-Origin", "*");
+                corsHeaders.put("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                corsHeaders.put("Access-Control-Allow-Headers", "*");
+                
+                // 1. 核心路由：Flash 离线核心拦截 (附带 CORS 头防止被 4399 等 iframe 阻止)
                 if (url.startsWith("https://app.local/ruffle/")) {
                     String assetPath = url.replace("https://app.local/", "");
                     try {
                         InputStream is = getAssets().open(assetPath);
                         String mime = "application/javascript";
-                        // WebAssembly 对 MimeType 要求极其严格，必须是 application/wasm，否则核心崩溃
                         if (assetPath.endsWith(".wasm")) mime = "application/wasm"; 
                         else if (assetPath.endsWith(".json")) mime = "application/json";
-                        return new WebResourceResponse(mime, "UTF-8", is);
+                        
+                        if (android.os.Build.VERSION.SDK_INT >= 21) {
+                            return new WebResourceResponse(mime, "UTF-8", 200, "OK", corsHeaders, is);
+                        } else {
+                            return new WebResourceResponse(mime, "UTF-8", is);
+                        }
                     } catch (Exception e) { e.printStackTrace(); }
                 }
 
-                // 2. 本地流媒体拦截：喂给浏览器大文件（几十MB的SWF不再闪退）
+                // 2. 本地流媒体拦截：【核心修复2】提供精确的 Content-Length，解决本地游戏永远卡在加载界面 0% 的问题
                 if (url.equals("https://app.local/stream_game_data") && pendingLocalGameUri != null) {
                     try {
                         InputStream is = getContentResolver().openInputStream(pendingLocalGameUri);
-                        return new WebResourceResponse("application/octet-stream", "UTF-8", is);
+                        // 获取文件的精确字节数，告诉 Flash 游戏的加载条总量是多少
+                        corsHeaders.put("Content-Length", String.valueOf(is.available()));
+                        
+                        if (android.os.Build.VERSION.SDK_INT >= 21) {
+                            return new WebResourceResponse("application/octet-stream", "UTF-8", 200, "OK", corsHeaders, is);
+                        } else {
+                            return new WebResourceResponse("application/octet-stream", "UTF-8", is);
+                        }
                     } catch (Exception e) { e.printStackTrace(); }
                 }
                 
-                // 3. 自动生成本地 Flash 容器页面 (注意这里改成了调用离线本地核心)
+                // 3. 自动生成本地 Flash 容器页面
                 if (url.equals("https://app.local/flash_player.html")) {
                     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
                             "<style>body,html{margin:0;padding:0;width:100%;height:100%;background:black;overflow:hidden;}</style>" +
-                            "<script src='https://app.local/ruffle/ruffle.js'></script></head><body>" + // <-- 离线极速读取
+                            "<script src='https://app.local/ruffle/ruffle.js'></script></head><body>" + 
                             "<div id='ruffle-container' style='width:100%; height:100%;'></div>" +
                             "<script>" +
                             "window.RufflePlayer = window.RufflePlayer || {};" +
@@ -289,12 +306,26 @@ public class MainActivity extends Activity {
                     return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
                 }
 
-                // 4. 自动生成本地 Java (J2ME) 容器页面
+                // 4. 自动生成本地 Java (J2ME) 容器页面 【核心修复3】正式接入 CheerpJ 3 (真·Java字节码编译器)
                 if (url.equals("https://app.local/java_player.html")) {
                     String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
-                            "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;}</style></head><body>" +
-                            "<h2>☕ Java/J2ME Core</h2><p>流媒体通道已就绪。</p><p>正在等待 Java 核心对接...</p>" +
-                            "</body></html>";
+                            "<style>body{margin:0;background:black;color:white;display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;}</style>" +
+                            "<script src='https://cj3.leaningtech.com/3.0/cj3loader.js'></script></head><body>" +
+                            "<h2 id='jtext'>☕ 正在启动 Java 虚拟机引擎...</h2>" +
+                            "<script>" +
+                            "async function runJava() {" +
+                            "  try {" +
+                            "    await cheerpjInit();" +
+                            "    document.getElementById('jtext').innerText = '☕ 正在载入 JAR 字节流...';" +
+                            "    const response = await fetch('https://app.local/stream_game_data');" +
+                            "    const arrayBuffer = await response.arrayBuffer();" +
+                            "    cheerpjAddStringFile('/str/game.jar', new Uint8Array(arrayBuffer));" +
+                            "    document.getElementById('jtext').style.display = 'none';" +
+                            "    await cheerpjRunJar('/str/game.jar');" +
+                            "  } catch (e) { document.getElementById('jtext').innerText = '启动失败: ' + e; }" +
+                            "}" +
+                            "runJava();" +
+                            "</script></body></html>";
                     return new WebResourceResponse("text/html", "UTF-8", new java.io.ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
                 }
 
@@ -308,11 +339,16 @@ public class MainActivity extends Activity {
                 if (currentEngineMode == 1) { 
                     String js = "javascript:(function() {" +
                         "if(window.injected)return; window.injected=true;" +
-                        "var script = document.createElement('script');" +
-                        "script.src = 'https://app.local/ruffle/ruffle.js';" + // <-- 离线极速读取
-                        "document.head.appendChild(script);" +
                         "window.RufflePlayer = window.RufflePlayer || {};" +
-                        "window.RufflePlayer.config = { 'autoplay': 'on', 'unmuteOverlay': 'hidden' };" +
+                        "window.RufflePlayer.config = { " +
+                        "  'publicPath': 'https://app.local/ruffle/', " + // 【关键点】：强制指定公用路径为拦截器路径
+                        "  'autoplay': 'on', " +
+                        "  'unmuteOverlay': 'hidden', " +
+                        "  'allowScriptAccess': true " +
+                        "};" +
+                        "var script = document.createElement('script');" +
+                        "script.src = 'https://app.local/ruffle/ruffle.js';" + 
+                        "document.head.appendChild(script);" +
                         "var frames = document.getElementsByTagName('iframe');" +
                         "for(var i=0; i<frames.length; i++) {" +
                         "   try { frames[i].contentWindow.document.head.appendChild(script.cloneNode(true)); } catch(e){}" +
@@ -622,6 +658,12 @@ public class MainActivity extends Activity {
                 activity.screenOrientationMode = (activity.screenOrientationMode + 1) % 3;
                 activity.prefs.edit().putInt("screenOrientation", activity.screenOrientationMode).apply();
                 activity.applyScreenOrientation(); dialog.dismiss();
+            }));
+
+            // 补回丢失的重新输入网址功能
+            layout.addView(createMenuButton("🌐 重新输入网址", v -> { 
+                dialog.dismiss(); 
+                activity.showUrlInputDialog(targetEngine.getUrl()); 
             }));
 
             layout.addView(createMenuButton("🏠 返回主菜单 (核心选择)", v -> { dialog.dismiss(); activity.showStartupSelector(); }));
