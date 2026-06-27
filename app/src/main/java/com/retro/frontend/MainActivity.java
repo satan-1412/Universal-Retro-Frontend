@@ -215,6 +215,40 @@ public class MainActivity extends Activity {
         dialog.setContentView(layout); dialog.show();
     }
 
+    public void startGameContainer(String url) {
+        rootLayout.removeAllViews();
+        if (webView.getParent() != null) {
+            ((ViewGroup) webView.getParent()).removeView(webView);
+        }
+        rootLayout.addView(webView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        if (gamepadView == null) {
+            gamepadView = new GamepadView(this, webView);
+        } else if (gamepadView.getParent() != null) {
+            ((ViewGroup) gamepadView.getParent()).removeView(gamepadView);
+        }
+        rootLayout.addView(gamepadView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        applyWebUASettings();
+        webView.loadUrl(url);
+    }
+
+    public void applyWebUASettings() {
+        if (webView == null) return;
+        WebSettings settings = webView.getSettings();
+        if (webUAMode == 1) {
+            settings.setUserAgentString(UA_PC);
+        } else if (webUAMode == 2) {
+            settings.setUserAgentString(UA_TABLET);
+        } else {
+            settings.setUserAgentString(UA_MOBILE);
+        }
+    }
+
     // ================= 核心：硬件加速与拦截引擎 =================
     @SuppressLint("SetJavaScriptEnabled")
     private void setupWebView() {
